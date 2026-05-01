@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  MIX_ENV: test
+
+jobs:
+  check:
+    name: mix check (Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }}, consolidate=${{ matrix.consolidate }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Floor: confirms the library still works for users on the minimum.
+          - elixir: "1.18.4"
+            otp: "27.2"
+            consolidate: "false"
+          # Bleeding edge: where new compiler/type warnings surface.
+          - elixir: "1.20.0-rc.4"
+            otp: "27.2"
+            consolidate: "false"
+          # Confirm protocol consolidation (release-style) doesn't break dispatch.
+          - elixir: "1.18.4"
+            otp: "27.2"
+            consolidate: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ matrix.elixir }}
+          otp-version: ${{ matrix.otp }}
+
+      - name: Cache deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-${{ matrix.elixir }}-${{ matrix.otp }}-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.elixir }}-${{ matrix.otp }}-
+
+      - name: Cache Dialyzer PLT
+        uses: actions/cache@v4
+        with:
+          path: priv/plts
+          key: ${{ runner.os }}-plt-${{ matrix.elixir }}-${{ matrix.otp }}-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-plt-${{ matrix.elixir }}-${{ matrix.otp }}-
+
+      - run: mix deps.get
+
+      - name: Build PLT
+        run: mix dialyzer --plt
+
+      - name: Run mix check
+        env:
+          VFS_CONSOLIDATE_PROTOCOLS: ${{ matrix.consolidate }}
+        run: mix check
