@@ -45,7 +45,10 @@ defmodule VFS.Default do
       {:ok, %VFS.Stat{type: :directory} = stat, _impl2} ->
         children = directory_children(impl, path, depth, max_depth)
         emitted = if include_dirs, do: [{path, stat}], else: []
-        {emitted, children ++ rest}
+        # children bounded by branching factor; depth-first via stack-prepend.
+        # vfs:audit-ok
+        new_queue = children ++ rest
+        {emitted, new_queue}
 
       {:ok, stat, _impl2} ->
         {[{path, stat}], rest}

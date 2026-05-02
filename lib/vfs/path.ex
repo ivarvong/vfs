@@ -47,7 +47,7 @@ defmodule VFS.Path do
     raise ArgumentError, "VFS paths must be absolute (start with `/`); got: #{inspect(other)}"
   end
 
-  defp normalize_segments([], acc), do: Enum.reverse(acc)
+  defp normalize_segments([], acc), do: :lists.reverse(acc)
   defp normalize_segments(["." | rest], acc), do: normalize_segments(rest, acc)
   defp normalize_segments([".." | rest], [_ | tail]), do: normalize_segments(rest, tail)
   defp normalize_segments([".." | rest], []), do: normalize_segments(rest, [])

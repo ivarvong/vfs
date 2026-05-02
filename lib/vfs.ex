@@ -344,11 +344,10 @@ defmodule VFS do
     Stream.transform(
       inner,
       fn ->
-        :telemetry.execute(
-          event_prefix ++ [:start],
-          %{system_time: System.system_time()},
-          meta
-        )
+        # event_prefix is always 2 atoms; ++ cost is constant.
+        # vfs:audit-ok
+        start_event = event_prefix ++ [:start]
+        :telemetry.execute(start_event, %{system_time: System.system_time()}, meta)
 
         {0, System.monotonic_time()}
       end,
@@ -356,8 +355,11 @@ defmodule VFS do
       fn {count, start_time} ->
         duration = System.monotonic_time() - start_time
 
+        # vfs:audit-ok — 2 atoms
+        stop_event = event_prefix ++ [:stop]
+
         :telemetry.execute(
-          event_prefix ++ [:stop],
+          stop_event,
           Map.put(%{duration: duration}, count_key, count),
           meta
         )
@@ -531,7 +533,9 @@ defimpl VFS.Mountable, for: VFS do
   # When it's a Stream (paginated, unbounded), prepend synthetic children
   # then concat the stream — preserves laziness so consumers can `Stream.take`.
   defp merge_entries(real, synthetic) when is_list(real) do
-    (real ++ synthetic) |> Enum.uniq() |> Enum.sort()
+    # synthetic is the small list (mountpoint names); ++ stays cheap.
+    # vfs:audit-ok
+    (synthetic ++ real) |> Enum.uniq() |> Enum.sort()
   end
 
   defp merge_entries(real, synthetic) do

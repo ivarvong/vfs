@@ -217,7 +217,24 @@ mix dialyzer
 mix docs                   # ex_doc — first sentence of @moduledoc lands on hex.pm, write it deliberately
 mix vfs.mutate             # mutation testing — run periodically, NOT in mix check (slow)
 mix vfs.mutate --file lib/vfs/memory.ex  # single file
+mix vfs.audit              # static perf audit (regex-based; see lib/mix/tasks/vfs.audit.ex)
+mix run bench/path.exs     # individual benchmarks; see bench/baselines.md
 ```
+
+## Performance discipline
+
+- **`mix vfs.audit`** flags known anti-patterns (`++` between unbounded
+  lists, `length/1` in hot paths, `Map.size/1` instead of `map_size/1`,
+  etc.). Mark intentional exceptions with a trailing `# vfs:audit-ok`
+  pragma; always include a justification. Run before every commit.
+- **`bench/baselines.md`** documents reference numbers on a known
+  reference machine. A 2× regression from baseline on any headline
+  metric (path normalization, mount dispatch, walk throughput) is a
+  signal to investigate before merging.
+- The mount-table tax is real (~1–2 µs/op). For tight inner loops where
+  the mount is fixed, consider calling the backend's `defimpl` directly
+  via `VFS.Mountable.read_file(backend, path)` instead of going through
+  `VFS.read_file(mount_table, path)`.
 
 ## Mutation testing
 
