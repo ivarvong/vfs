@@ -202,6 +202,31 @@ aliases: [
 - **`elixirc_options: [warnings_as_errors: true]`** in `:prod` and `:test`. Type-system warnings from 1.18+/1.20-rc are bugs to fix, not noise to ignore.
 - **`mix format --migrate`** is run as part of `format` to auto-upgrade deprecated forms.
 
+## Test tags and what each runs
+
+Default `mix test` runs the unit + property + doctest suite only. Two
+opt-in integration tag scopes:
+
+  * `:integration` — local-only integration tests (e.g. `test/integration/exgit_test.exs`,
+    which builds a fixture git repo entirely in pure Elixir and exercises
+    the protocol against a real `Exgit.Repository`). No network.
+  * `:integration_network` — real-network smoke tests
+    (e.g. `test/integration/codesearch_smoke_test.exs`, which clones
+    `anthropics/skills` over HTTPS and runs codesearch over it). Slow,
+    flaky if the network drops, opt-in only.
+
+```sh
+mix test                                   # unit + property + doctest only
+mix test --include integration             # + local integration (exgit fixtures)
+mix test --include integration_network     # + real-network smokes
+mix test --include integration --include integration_network   # everything
+```
+
+`mix check` (the gate that runs every commit) only runs default-scoped
+tests for speed and reliability. Network tests live outside the gate by
+design — they're a smoke check you trigger when you want to validate
+the full stack against real GitHub, not on every commit.
+
 ## Useful commands
 
 ```sh
