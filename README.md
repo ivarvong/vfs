@@ -30,6 +30,18 @@ implements the protocol.
 
 See [SPEC.md](./SPEC.md) for the full design rationale.
 
+## One-file tour
+
+For a single guided walkthrough — every design decision demonstrated in
+runnable Elixir — read [`test/showcase_test.exs`](./test/showcase_test.exs).
+
+```sh
+mix test test/showcase_test.exs --trace                           # local sections
+mix test test/showcase_test.exs --trace --include integration_network   # + real-network demo
+```
+
+Nine sections, ~400 lines including prose. Recommended starting point.
+
 ## Status
 
 Pre-1.0. The protocol shape is settled (per `SPEC.md`); the API may still
