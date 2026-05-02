@@ -14,7 +14,10 @@
 #
 #     CODESEARCH_REPO     URL to clone (default: this repo, ivarvong/vfs)
 #     CODESEARCH_PATTERN  regex pattern (default: "defmodule")
-#     CODESEARCH_LAZY     "true" to use lazy partial clone (default: full)
+#     CODESEARCH_MODE     one of: "shallow" (default — depth=1, just HEAD),
+#                                 "full" (entire history),
+#                                 "lazy" (partial; fetch blobs on demand
+#                                 via materialize)
 
 defmodule Codesearch do
   @moduledoc false
@@ -24,25 +27,27 @@ defmodule Codesearch do
   def run do
     url = System.get_env("CODESEARCH_REPO", "https://github.com/ivarvong/vfs.git")
     pattern_str = System.get_env("CODESEARCH_PATTERN", "defmodule")
-    lazy? = System.get_env("CODESEARCH_LAZY", "false") == "true"
+    mode = parse_mode(System.get_env("CODESEARCH_MODE", "shallow"))
 
     pattern = Regex.compile!(pattern_str)
 
     IO.puts("repo:    #{url}")
     IO.puts("pattern: #{inspect(pattern)}")
-    IO.puts("mode:    #{if lazy?, do: "lazy partial clone", else: "full clone"}")
+    IO.puts("mode:    #{describe_mode(mode)}")
     IO.puts("")
 
-    {clone_us, repo} = clone(url, lazy?)
+    {clone_us, repo} = clone(url, mode)
     IO.puts(format_phase("clone", clone_us))
 
     fs = VFS.new() |> VFS.mount("/repo", ExgitMount.new(repo))
 
-    # In lazy mode, walk requires an eager repository — materialize is
-    # the lever to convert in one shot. In full-clone mode, the repo is
-    # already eager and materialize is a no-op.
+    # In `:lazy` mode the repo is in lazy partial-clone state — walk
+    # requires it to be eager. `VFS.materialize` flips the mode and
+    # batch-fetches every referenced blob in one shot. For `:full` and
+    # `:shallow`, the repo is already eager and materialize is a no-op
+    # (we skip the call rather than emit a useless 0-ms phase).
     fs =
-      if lazy? do
+      if mode == :lazy do
         {mat_us, primed} = time(fn -> materialize!(fs) end)
         IO.puts(format_phase("materialize", mat_us))
         primed
@@ -72,16 +77,34 @@ defmodule Codesearch do
 
   # ── phases ────────────────────────────────────────────────────────────
 
-  defp clone(url, false) do
+  defp parse_mode("shallow"), do: :shallow
+  defp parse_mode("full"), do: :full
+  defp parse_mode("lazy"), do: :lazy
+  defp parse_mode(other), do: abort("unknown CODESEARCH_MODE: #{inspect(other)}")
+
+  defp describe_mode(:shallow), do: "shallow clone (depth=1 — HEAD commit only, no history)"
+  defp describe_mode(:full), do: "full clone (entire history)"
+  defp describe_mode(:lazy), do: "lazy partial clone (fetch blobs on demand via materialize)"
+
+  defp clone(url, :shallow) do
     time(fn ->
-      case Exgit.clone(url) do
+      case Exgit.clone(url, depth: 1) do
         {:ok, repo} -> repo
-        {:error, reason} -> abort("clone failed: #{inspect(reason)}")
+        {:error, reason} -> abort("shallow clone failed: #{inspect(reason)}")
       end
     end)
   end
 
-  defp clone(url, true) do
+  defp clone(url, :full) do
+    time(fn ->
+      case Exgit.clone(url) do
+        {:ok, repo} -> repo
+        {:error, reason} -> abort("full clone failed: #{inspect(reason)}")
+      end
+    end)
+  end
+
+  defp clone(url, :lazy) do
     time(fn ->
       case Exgit.clone(url, lazy: true, filter: {:blob, :none}) do
         {:ok, repo} -> repo
