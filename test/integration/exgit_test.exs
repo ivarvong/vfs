@@ -5,40 +5,76 @@ defmodule VFS.Integration.ExgitTest do
   fits a non-trivial backend (lazy partial-clone, content-addressed,
   network-capable).
 
-  Requires the `git` binary on PATH for fixture setup.
-  """
-  use ExUnit.Case, async: false
+  The repo fixture is built **entirely in pure Elixir** via exgit's own
+  `ObjectStore` / `RefStore` / `Object.{Blob,Tree,Commit}` primitives —
+  no shelling out to a `git` binary. This matters because: (a) vfs is a
+  pure library and we hold the line in tests too; (b) the whole point
+  of `:exgit` is to avoid the binary; testing it by going around it
+  defeats the purpose.
 
+  Pattern follows `Exgit.FsTest`'s own setup.
+  """
+  use ExUnit.Case, async: true
+
+  alias Exgit.{ObjectStore, RefStore}
+  alias Exgit.Object.{Blob, Commit, Tree}
   alias VFS.Test.ExgitMount
 
   @moduletag :integration
 
   setup_all do
-    {tmp, repo} = setup_fixture()
-    on_exit(fn -> File.rm_rf!(tmp) end)
-    {:ok, tmp: tmp, repo: repo}
+    {:ok, repo: build_fixture()}
   end
 
-  defp setup_fixture do
-    tmp = Path.join(System.tmp_dir!(), "vfs_exgit_#{System.unique_integer([:positive])}")
-    File.mkdir_p!(tmp)
+  # Pure-Elixir fixture: in-memory ObjectStore + RefStore, blobs, trees,
+  # commit, and HEAD pointing at refs/heads/main. No git binary, no FS.
+  defp build_fixture do
+    store = ObjectStore.Memory.new()
 
-    {_, 0} = System.cmd("git", ["init", "-q", "-b", "main", tmp])
+    {readme_sha, store} = put_blob(store, "# Test\n")
+    {src_sha, store} = put_blob(store, "code\n")
+    {a_sha, store} = put_blob(store, "defmodule A do end\n")
+    {b_sha, store} = put_blob(store, "defmodule B do end\n")
 
-    File.write!(Path.join(tmp, "README.md"), "# Test\n")
-    File.write!(Path.join(tmp, "src.txt"), "code\n")
-    File.mkdir_p!(Path.join(tmp, "lib"))
-    File.write!(Path.join(tmp, "lib/a.ex"), "defmodule A do end\n")
-    File.write!(Path.join(tmp, "lib/b.ex"), "defmodule B do end\n")
+    lib_tree = Tree.new([{"100644", "a.ex", a_sha}, {"100644", "b.ex", b_sha}])
+    {:ok, lib_sha, store} = ObjectStore.put(store, lib_tree)
 
-    {_, 0} = System.cmd("git", ["-C", tmp, "config", "user.email", "test@test.com"])
-    {_, 0} = System.cmd("git", ["-C", tmp, "config", "user.name", "Test"])
-    {_, 0} = System.cmd("git", ["-C", tmp, "add", "."])
-    {_, 0} = System.cmd("git", ["-C", tmp, "commit", "-q", "-m", "initial"])
+    root_tree =
+      Tree.new([
+        {"100644", "README.md", readme_sha},
+        {"40000", "lib", lib_sha},
+        {"100644", "src.txt", src_sha}
+      ])
 
-    # Exgit.open expects the .git directory itself, not the working tree.
-    {:ok, repo} = Exgit.open(Path.join(tmp, ".git"))
-    {tmp, repo}
+    {:ok, root_sha, store} = ObjectStore.put(store, root_tree)
+
+    commit =
+      Commit.new(
+        tree: root_sha,
+        parents: [],
+        author: "T <t@t> 1700000000 +0000",
+        committer: "T <t@t> 1700000000 +0000",
+        message: "initial\n"
+      )
+
+    {:ok, commit_sha, store} = ObjectStore.put(store, commit)
+
+    {:ok, ref_store} =
+      RefStore.write(RefStore.Memory.new(), "refs/heads/main", commit_sha, [])
+
+    {:ok, ref_store} = RefStore.write(ref_store, "HEAD", {:symbolic, "refs/heads/main"}, [])
+
+    %Exgit.Repository{
+      object_store: store,
+      ref_store: ref_store,
+      config: Exgit.Config.new(),
+      path: nil
+    }
+  end
+
+  defp put_blob(store, content) do
+    {:ok, sha, store} = ObjectStore.put(store, Blob.new(content))
+    {sha, store}
   end
 
   test "stat through the mount table", %{repo: repo} do
