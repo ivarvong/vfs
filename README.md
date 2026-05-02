@@ -42,6 +42,23 @@ mix test test/showcase_test.exs --trace --include integration_network   # + real
 
 Nine sections, ~400 lines including prose. Recommended starting point.
 
+## Worked examples
+
+Real-network demos in `examples/`:
+
+```sh
+# "What are all the skills in this repo?" — clone anthropics/skills,
+# parse YAML front-matter from every SKILL.md, return structured records.
+# This is what codesearch actually means: a query over the codebase that
+# returns data, not lines.
+MIX_ENV=test mix run examples/list_skills.exs
+
+# Grep over an arbitrary repo. Counts regex matches per file. The
+# unstructured cousin of list_skills — useful for ad-hoc line counts,
+# not for answering questions.
+MIX_ENV=test mix run examples/grep.exs
+```
+
 ## Status
 
 Pre-1.0. The protocol shape is settled (per `SPEC.md`); the API may still

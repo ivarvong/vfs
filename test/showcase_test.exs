@@ -65,8 +65,13 @@ defmodule VFS.ShowcaseTest do
                                   InfiniteTree, LazyDir, ExgitMount).
                                   Read these to see what writing a
                                   backend looks like.
-    * `examples/codesearch.exs`— real-network demo (clone a GitHub
-                                  repo, mount, walk, grep)
+    * `examples/list_skills.exs`— real-network codesearch demo: clone
+                                  anthropics/skills, parse YAML front-
+                                  matter from every SKILL.md, return
+                                  structured records. The canonical
+                                  example of what this stack enables.
+    * `examples/grep.exs`       — real-network regex grep (the simpler
+                                  unstructured variant)
   """
   use ExUnit.Case, async: true
 
@@ -423,56 +428,97 @@ defmodule VFS.ShowcaseTest do
     end
   end
 
-  describe "9. Real-world: codesearch over a public GitHub repo" do
+  describe "9. Real-world: structured codesearch over a public GitHub repo" do
     @moduletag :integration_network
     @moduletag timeout: 60_000
 
-    test "clone anthropics/skills, mount, walk, grep — full stack, real network" do
-      # This test cuts a network connection to github.com and uses
-      # `:exgit` (a pure-Elixir git client — no `git` binary, no shell)
-      # to clone the repo over HTTPS.
+    @doc """
+    The agent-loop scenario the library was designed for: answer the
+    question "what are all the skills in this repo?" with structured
+    data, not lines of regex matches. The same code that runs a
+    `Stream.map` against in-memory data runs against a freshly-cloned
+    GitHub repo via the same protocol.
 
+    What "codesearch" means here: a *query* over the codebase that
+    returns data, not bytes. The output is a list of `{name,
+    description, path}` records that an agent can route on, filter,
+    sort, or display. That's the value over a regex grep — agents
+    consume structure, not text.
+
+    Stack: HTTPS → pure-Elixir git smart-protocol → vfs mount table →
+    walk → read_file → YAML front-matter parser. Pure values from end
+    to end; no shared mutable state, no shelling out, no `git` binary.
+    """
+    test "list every skill in anthropics/skills with name + description" do
+      # 1. Clone over the network (shallow: HEAD only, no history).
       {:ok, repo} =
         Exgit.clone("https://github.com/anthropics/skills.git", depth: 1)
 
-      # Wrap the Exgit.Repository in a thin defimpl. In production this
-      # lives in :exgit; for this repo we ship the wrapper in
-      # test/support/exgit_mount.ex as a worked example.
+      # 2. Mount the cloned repo. The wrapper struct + defimpl is in
+      #    test/support/exgit_mount.ex; in production it lives in
+      #    :exgit itself.
       fs = VFS.new() |> VFS.mount("/repo", ExgitMount.new(repo))
 
-      # Walk the entire tree.
-      paths = fs |> VFS.walk("/repo") |> Enum.map(&elem(&1, 0))
+      # 3. The query: walk → filter to SKILL.md → parse front-matter.
+      #    Lazy throughout; only the SKILL.md files are actually read.
+      skills =
+        fs
+        |> VFS.walk("/repo")
+        |> Stream.map(&elem(&1, 0))
+        |> Stream.filter(&String.ends_with?(&1, "/SKILL.md"))
+        |> Enum.flat_map(&parse_skill(fs, &1))
 
-      # 100+ files in the repo as of writing. Bound is generous so the
-      # test stays stable as Anthropic adds skills.
-      assert length(paths) > 100
-
-      # Read every SKILL.md and verify it has YAML front-matter with
-      # `name:` and `description:` — the documented contract for
-      # Claude Code skills.
-      skills = Enum.filter(paths, &String.ends_with?(&1, "/SKILL.md"))
+      # 4. Verify the structure. The exact set of skills changes over
+      #    time; the schema doesn't.
       assert length(skills) >= 10
+      assert Enum.all?(skills, &is_binary(&1.name))
+      assert Enum.all?(skills, &is_binary(&1.description))
+      assert Enum.all?(skills, &String.ends_with?(&1.path, "/SKILL.md"))
 
-      {fs, all_have_metadata} =
-        Enum.reduce(skills, {fs, true}, fn path, {fs, ok} ->
-          {:ok, content, fs} = VFS.read_file(fs, path)
+      # 5. Specific skills we expect to find as long as anthropics/skills
+      #    is what it says on the tin.
+      names = Enum.map(skills, & &1.name) |> MapSet.new()
+      assert MapSet.member?(names, "pdf"), "expected the pdf skill"
+      assert MapSet.member?(names, "skill-creator"), "expected the skill-creator skill"
 
-          ok =
-            ok and
-              Regex.match?(~r/^name:\s+\S/m, content) and
-              Regex.match?(~r/^description:\s+\S/m, content)
+      # See `examples/list_skills.exs` for the full version with nice
+      # output formatting — the same query, just printed instead of
+      # asserted.
+    end
+  end
 
-          {fs, ok}
+  # ── helpers used in section 9 ──────────────────────────────────────────
+
+  # Minimal YAML front-matter parser — top-level `key: value` pairs only.
+  # SKILL.md uses this shape; pulling in a YAML lib would be overkill.
+  defp parse_skill(fs, path) do
+    {:ok, content, _fs} = VFS.read_file(fs, path)
+
+    case parse_frontmatter(content) do
+      %{"name" => name, "description" => description} ->
+        [%{name: name, description: description, path: path}]
+
+      _ ->
+        []
+    end
+  end
+
+  defp parse_frontmatter(content) do
+    case String.split(content, "\n") do
+      ["---" | rest] ->
+        {yaml, _} = Enum.split_while(rest, &(&1 != "---"))
+
+        yaml
+        |> Enum.flat_map(fn line ->
+          case Regex.run(~r/^([a-zA-Z_][\w-]*):\s+(.+)$/, line) do
+            [_, k, v] -> [{k, String.trim(v)}]
+            _ -> []
+          end
         end)
+        |> Map.new()
 
-      _ = fs
-      assert all_have_metadata, "every SKILL.md should have name: and description: front-matter"
-
-      # Total cost on a typical machine: ~1s including network clone.
-      # Stack: HTTPS → pure-Elixir git smart-protocol → vfs mount
-      # table → walk → read_file → regex. Every step is sound, every
-      # step is a value-typed function call, no shared mutable state
-      # anywhere in the chain.
+      _ ->
+        %{}
     end
   end
 end

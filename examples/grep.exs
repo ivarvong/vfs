@@ -1,14 +1,15 @@
-# A real-network code-search workload: clone an actual GitHub repo via
-# `:exgit` (HTTPS smart protocol), mount it through `:vfs`, walk every
-# file in the tree, grep for a pattern, report stats.
+# A real-network *grep* over a GitHub repo: clone via `:exgit` (HTTPS),
+# mount through `:vfs`, walk every file, count regex matches per file,
+# report stats. The unstructured cousin of `examples/list_skills.exs`.
 #
-# This is the canonical agent-loop scenario the design was built for:
-# the same `%VFS{}` value flows from clone → mount → walk → read,
-# threading the lazy backend's cache forward at each step.
+# This is grep, not codesearch — the output is line counts, not
+# structured records. For *real* codesearch (parse front-matter, extract
+# semantic structure, return queryable data), see `list_skills.exs`.
+# Use this when you want a quick line count, not when you want answers.
 #
-# Usage (from the project root):
+# Usage:
 #
-#     MIX_ENV=test mix run examples/codesearch.exs
+#     MIX_ENV=test mix run examples/grep.exs
 #
 # Optional env vars:
 #
