@@ -238,7 +238,18 @@ defmodule VFS.ConformanceCase do
         describe "write_file/3" do
           test "writes to nested existing dir" do
             fs = fresh()
-            {:ok, fs} = VFS.mkdir(fs, "/dir", parents: true)
+
+            # mkdir is a separate capability — flat-keyed backends like
+            # AppService support :write but not :mkdir, so they auto-
+            # create implicit parents on write_file.
+            fs =
+              if :mkdir in @__backend_caps__ do
+                {:ok, fs} = VFS.mkdir(fs, "/dir", parents: true)
+                fs
+              else
+                fs
+              end
+
             {:ok, fs} = VFS.write_file(fs, "/dir/x", "ok")
             {:ok, "ok", _fs} = VFS.read_file(fs, "/dir/x")
           end
@@ -249,7 +260,9 @@ defmodule VFS.ConformanceCase do
             assert {:error, %Error{kind: :eisdir}} = VFS.write_file(fs, "/dir", "no")
           end
         end
+      end
 
+      if :mkdir in @__backend_caps__ do
         describe "mkdir/3" do
           test "creates an empty directory" do
             fs = fresh()

@@ -176,11 +176,8 @@ defimpl VFS.Mountable, for: VFS.Memory do
 
     case Map.fetch(mem.tree, p) do
       {:ok, content} ->
-        with {:ok, chunk_size} <- validate_chunk_size(opts),
-             {:ok, sliced} <- apply_byte_range(content, opts),
-             {:ok, sliced} <- apply_line_range(sliced, opts) do
-          {:ok, chunk_stream(sliced, chunk_size), mem}
-        else
+        case VFS.StreamOptions.apply(content, opts) do
+          {:ok, stream} -> {:ok, stream, mem}
           {:error, reason} -> {:error, Error.new(reason, path: p)}
         end
 
@@ -264,7 +261,7 @@ defimpl VFS.Mountable, for: VFS.Memory do
     end
   end
 
-  def capabilities(_), do: MapSet.new([:read, :write])
+  def capabilities(_), do: MapSet.new([:read, :write, :mkdir])
 
   # ── helpers ──
 
@@ -341,87 +338,7 @@ defimpl VFS.Mountable, for: VFS.Memory do
     |> MapSet.new()
   end
 
-  # ── option validation + slicing ──
-
-  defp validate_chunk_size(opts) do
-    case Keyword.get(opts, :chunk_size, 64 * 1024) do
-      n when is_integer(n) and n > 0 -> {:ok, n}
-      _ -> {:error, :einval}
-    end
-  end
-
-  defp apply_byte_range(content, opts) do
-    case Keyword.fetch(opts, :byte_range) do
-      :error ->
-        {:ok, content}
-
-      {:ok, {start, length}}
-      when is_integer(start) and start >= 0 and is_integer(length) and length >= 0 ->
-        {:ok, slice_bytes(content, start, length)}
-
-      {:ok, _bad} ->
-        {:error, :einval}
-    end
-  end
-
-  defp slice_bytes(content, start, _length) when start >= byte_size(content), do: <<>>
-
-  defp slice_bytes(content, start, length) do
-    available = byte_size(content) - start
-    take = min(length, available)
-    :binary.part(content, start, take)
-  end
-
-  defp apply_line_range(content, opts) do
-    case Keyword.fetch(opts, :line_range) do
-      :error ->
-        {:ok, content}
-
-      {:ok, {first, last}} when is_integer(first) and first >= 1 ->
-        slice_lines(content, first, last)
-
-      {:ok, _bad} ->
-        {:error, :einval}
-    end
-  end
-
-  # `last == :end` is always valid — read to EOF.
-  defp slice_lines(content, first, :end) do
-    lines = String.split(content, "\n")
-    sliced = lines |> Enum.slice((first - 1)..(length(lines) - 1)//1) |> Enum.join("\n")
-    {:ok, sliced}
-  end
-
-  # Integer last must be >= first AND >= 1. Anything else is :einval —
-  # specifically `last < first` and `last < 1`. We validate this loudly
-  # rather than letting it fall through to `Enum.slice/2`'s range
-  # semantics, which interpret negative indices as offsets-from-end and
-  # would silently return surprising slices to a caller who passed a
-  # malformed range. For LLM agent tools that retrieve precise line
-  # context, silent-wrong is the worst possible behavior; loud :einval
-  # lets the agent pivot.
-  defp slice_lines(content, first, last)
-       when is_integer(last) and last >= first and last >= 1 do
-    lines = String.split(content, "\n")
-    sliced = lines |> Enum.slice((first - 1)..(last - 1)//1) |> Enum.join("\n")
-    {:ok, sliced}
-  end
-
-  defp slice_lines(_content, _first, _last), do: {:error, :einval}
-
-  defp chunk_stream(<<>>, _size), do: []
-
-  defp chunk_stream(content, chunk_size) when chunk_size > 0 do
-    Stream.unfold(content, fn
-      <<>> ->
-        nil
-
-      bin when byte_size(bin) <= chunk_size ->
-        {bin, <<>>}
-
-      bin ->
-        <<chunk::binary-size(^chunk_size), rest::binary>> = bin
-        {chunk, rest}
-    end)
-  end
+  # Stream-option handling (chunk_size, byte_range, line_range) lives
+  # in `VFS.StreamOptions`. Every backend whose stream_read returns
+  # bytes uses the same helper.
 end

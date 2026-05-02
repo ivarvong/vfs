@@ -99,3 +99,17 @@ defmodule VFS.StateThreadingTest do
     end
   end
 end
+
+defmodule VFS.LazyFakeConformanceTest do
+  @moduledoc false
+  # Run the conformance suite against `VFS.Test.LazyFake` (read-only).
+  # Capabilities: `[:read, :lazy]`. Conformance gates write tests on
+  # `:write` and `mkdir` tests on `:mkdir`, so this exercises the
+  # read-only contract surface only — but it does so against a backend
+  # whose internals (cache + miss counter) are deliberately different
+  # from Memory's, providing real coverage that the protocol contract
+  # holds across implementation shapes.
+  use VFS.ConformanceCase,
+    backend: fn -> VFS.Test.LazyFake.new() end,
+    capabilities: [:read, :lazy]
+end

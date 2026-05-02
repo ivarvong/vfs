@@ -1,7 +1,7 @@
 defmodule VFS.MemoryTest do
   use VFS.ConformanceCase,
     backend: fn -> VFS.Memory.new() end,
-    capabilities: [:read, :write]
+    capabilities: [:read, :write, :mkdir]
 
   doctest VFS.Memory
 
@@ -21,7 +21,7 @@ defmodule VFS.MemoryTest do
   describe "capabilities" do
     test "reports :read and :write" do
       caps = VFS.capabilities(VFS.Memory.new())
-      assert MapSet.equal?(caps, MapSet.new([:read, :write]))
+      assert MapSet.equal?(caps, MapSet.new([:read, :write, :mkdir]))
     end
   end
 

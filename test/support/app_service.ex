@@ -93,51 +93,68 @@ defimpl VFS.Mountable, for: VFS.Test.AppService do
   def readdir(%AppService{storage: storage} = svc, path) do
     p = VFS.Path.normalize(path)
 
-    if p == "/" or directory?(storage, p) do
-      prefix = if p == "/", do: "/", else: p <> "/"
+    cond do
+      p == "/" or directory?(storage, p) ->
+        prefix = if p == "/", do: "/", else: p <> "/"
 
-      names =
-        storage
-        |> Map.keys()
-        |> Enum.flat_map(fn key ->
-          if String.starts_with?(key, prefix) and key != prefix do
-            rest = String.replace_prefix(key, prefix, "")
-            [rest |> String.split("/", parts: 2) |> hd()]
-          else
-            []
-          end
-        end)
-        |> Enum.uniq()
-        |> Enum.sort()
+        names =
+          storage
+          |> Map.keys()
+          |> Enum.flat_map(fn key ->
+            if String.starts_with?(key, prefix) and key != prefix do
+              rest = String.replace_prefix(key, prefix, "")
+              [rest |> String.split("/", parts: 2) |> hd()]
+            else
+              []
+            end
+          end)
+          |> Enum.uniq()
+          |> Enum.sort()
 
-      {:ok, names, svc}
-    else
-      {:error, Error.new(:enoent, path: p)}
+        {:ok, names, svc}
+
+      Map.has_key?(storage, p) ->
+        {:error, Error.new(:enotdir, path: p)}
+
+      true ->
+        {:error, Error.new(:enoent, path: p)}
     end
   end
 
-  def stream_read(%AppService{} = svc, path, _opts) do
+  def stream_read(%AppService{} = svc, path, opts) do
     p = VFS.Path.normalize(path)
 
+    cond do
+      # Path is a known file (in cache or storage): fetch + apply opts.
+      Map.has_key?(svc.cache, p) or Map.has_key?(svc.storage, p) ->
+        {content, svc} = fetch_with_cache(svc, p)
+
+        case VFS.StreamOptions.apply(content, opts) do
+          {:ok, stream} -> {:ok, stream, svc}
+          {:error, reason} -> {:error, Error.new(reason, path: p)}
+        end
+
+      directory?(svc.storage, p) ->
+        {:error, Error.new(:eisdir, path: p)}
+
+      true ->
+        {:error, Error.new(:enoent, path: p)}
+    end
+  end
+
+  defp fetch_with_cache(%AppService{} = svc, p) do
     case Map.fetch(svc.cache, p) do
       {:ok, content} ->
         :telemetry.execute([:vfs, :cache, :hit], %{}, %{path: p, impl: AppService})
-        {:ok, [content], %{svc | hits: svc.hits + 1}}
+        {content, %{svc | hits: svc.hits + 1}}
 
       :error ->
-        case Map.fetch(svc.storage, p) do
-          {:ok, content} ->
-            # Simulates the SELECT round-trip; populate the cache so
-            # subsequent reads of this path on this connection are free.
-            :telemetry.execute([:vfs, :cache, :miss], %{}, %{path: p, impl: AppService})
+        content = Map.fetch!(svc.storage, p)
+        # Simulates the SELECT round-trip; populate the cache so
+        # subsequent reads of this path on this connection are free.
+        :telemetry.execute([:vfs, :cache, :miss], %{}, %{path: p, impl: AppService})
 
-            {:ok, [content], %{svc | cache: Map.put(svc.cache, p, content), misses: svc.misses + 1}}
-
-          :error ->
-            if directory?(svc.storage, p),
-              do: {:error, Error.new(:eisdir, path: p)},
-              else: {:error, Error.new(:enoent, path: p)}
-        end
+        {content, %{svc | cache: Map.put(svc.cache, p, content), misses: svc.misses + 1}}
     end
   end
 

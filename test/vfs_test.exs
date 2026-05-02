@@ -261,5 +261,5 @@ defmodule VFS.MountTableConformanceTest do
   # Run the full conformance suite against `%VFS{}` itself.
   use VFS.ConformanceCase,
     backend: fn -> VFS.new() |> VFS.mount("/", VFS.Memory.new()) end,
-    capabilities: [:read, :write]
+    capabilities: [:read, :write, :mkdir]
 end

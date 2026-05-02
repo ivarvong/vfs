@@ -154,6 +154,57 @@ Rules:
 - Pattern-match in function heads to express the contract — prefer `def stream_read(%VFS.Memory{} = mem, path, opts)` over `case impl.__struct__` in the body.
 - Idiomatic Elixir baseline: `Stream.resource/3` for `walk`; `Task.async_stream/3` for parallel ops; `IO.iodata_to_binary/1` (canonical) for the iodata roll-up; pin operator (`^`) where it clarifies; no `String.to_atom/1` on dynamic input; no `try/rescue` for control flow.
 
+## Testing discipline (the rules that earned us trust)
+
+This library powers an AI agent platform that spends real money in tokens.
+Bugs in retrieval / context construction propagate to downstream model
+behavior with no easy backtracking. The bar is correctness-first; speed
+is a downstream concern.
+
+The audit on 2026-05-02 surfaced four bugs that **slipped past 100% line
+coverage, 93% mutation kill rate, and a comprehensive conformance suite**.
+Each bug was missing code (a missing filter, missing branch, missing
+guard, missing composition step), not wrong code — and all our existing
+tests verified "the code does what we wrote it to do," not "the code
+matches the contract we publish."
+
+The five rules below codify what we learned. They apply forever.
+
+**1. Every published contract claim has a property test that proves it.**
+A `@doc` or `@spec` claim is a promise to consumers. Each promise gets
+a property in `test/vfs/contracts_test.exs`. The four bugs were all
+contract claims that had no property: walk-equals-namespace, lazy-readdir,
+seed-consistency, line-range-validity. Property tests are written
+*before* the fix, not after. RED → GREEN.
+
+**2. Documented limitations are tagged failing tests, not docstring prose.**
+A docstring saying "X is not yet supported" is a TODO with no enforcement.
+Either the limitation is real and gets a `@tag :known_limitation` failing
+test that fails with a clear message about why, or it gets fixed. No
+silent gaps.
+
+**3. Public constructors get adversarial input properties.**
+Anything that takes user data (`VFS.Memory.new/1`, `VFS.Path.normalize/1`,
+opts to `stream_read/3`) gets property tests over arbitrary integers,
+binaries, and shapes. Inputs in production come from LLM-generated tool
+calls, network responses, runtime config. Surprise crashes there are
+worse than `:einval`; silent wrong answers are worst of all.
+
+**4. The conformance suite covers every shipped backend.**
+A backend that ships and isn't in the conformance suite is shipping with
+unverified contract behavior. AppService surfaced its own bug (didn't
+honor `:byte_range` / `:line_range` / `:chunk_size`) the moment it was
+added to conformance. New backends add one parametrization to the suite;
+no exceptions for "this one is special."
+
+**5. When a reviewer finds a bug, write the contract property first.**
+The order is: receive bug report → write a property test that captures
+the *contract* the bug violates → see it fail → write the fix → see it
+pass. Reverse order risks fixes that match the bug report's exact shape
+but miss the broader contract.
+
+These rules sit alongside the existing testing bar:
+
 ## Testing bar
 
 - **Coverage gate is 100% line, no exceptions.** ExCoveralls. Genuinely unreachable branches use a single-line `# coveralls-ignore-next-line` with a comment explaining why. CI fails the build if coverage drops below 100%. The library is small enough that the floor is achievable; "95% with handwave" is a slippery floor for a foundational dep.

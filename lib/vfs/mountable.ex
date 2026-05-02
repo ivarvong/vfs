@@ -45,10 +45,24 @@ defprotocol VFS.Mountable do
   @typedoc "An absolute, normalized path (see `VFS.Path`)."
   @type path :: String.t()
 
-  @typedoc "Capability flags reported by `capabilities/1`."
+  @typedoc """
+  Capability flags reported by `capabilities/1`.
+
+    * `:read`   — `stream_read/3`, `stat/2`, `readdir/2`, `walk/3` work.
+    * `:write`  — `write_file/4` and `rm/3` work on file paths. (Does NOT
+                  imply `mkdir/3`; flat-keyed backends like S3 / postgres
+                  support `:write` without `:mkdir`.)
+    * `:mkdir`  — `mkdir/3` works (the backend models empty directories).
+    * `:lazy`   — `materialize/2` does meaningful work (the backend has
+                  a cache that can be pre-warmed).
+    * `:native_walk`        — `walk/3` is implemented natively (faster than
+                              the default composed-from-stat-and-readdir).
+    * `:native_stream_read` — `stream_read/3` is implemented natively.
+  """
   @type capability ::
           :read
           | :write
+          | :mkdir
           | :native_walk
           | :native_stream_read
           | :lazy
@@ -112,10 +126,16 @@ defprotocol VFS.Mountable do
   populated during enumeration does not escape; call `materialize/2` first
   for agent loops that re-touch files after a walk.
 
-  Default-implementation traversal is depth-first. `Stream.take/2` halts the
-  traversal as soon as the consumer has enough — composes lazily over
-  arbitrarily deep (even infinite-depth) trees so long as `readdir/2`
-  returns finite per-directory lists.
+  Default-implementation traversal is depth-first and **fully lazy**:
+  `Stream.take/2` halts the traversal as soon as the consumer has enough,
+  including over backends whose `readdir/2` returns an unbounded
+  `t:Enumerable.t/0` (paginated S3 listings, virtual `/integers/N`-style
+  namespaces, database cursors). The default walker pulls one entry at a
+  time from each directory's readdir output.
+
+  When the mount table contains overlapping mounts, walk respects
+  longest-prefix shadowing — paths reachable only through a shadowed
+  prefix are not yielded, matching `read_file/2`'s point-lookup behavior.
   """
   @spec walk(t, path, keyword) :: Enumerable.t({path, VFS.Stat.t()})
   def walk(impl, root, opts)
