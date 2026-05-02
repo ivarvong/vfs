@@ -37,6 +37,19 @@ defmodule VFS.Memory do
   @doc """
   Build a fresh in-memory FS, optionally seeded with files.
 
+  Raises `ArgumentError` if the seed is malformed:
+
+    * The literal `"/"` cannot be a file (root is always a directory).
+    * No two paths can be in a strict path-segment-prefix relationship
+      (e.g. `%{"/a" => "...", "/a/b" => "..."}` is rejected — `/a`
+      cannot simultaneously be a regular file and a directory).
+
+  Validation runs at construction so the resulting backend is internally
+  consistent: `stat`, `readdir`, and `read_file` agree on every path.
+  Without validation, externally-provided seeds (config files, DB dumps,
+  LLM-generated inputs) could put the FS into a state that no sequence
+  of writes could ever produce.
+
   ## Examples
 
       iex> mem = VFS.Memory.new()
@@ -46,20 +59,58 @@ defmodule VFS.Memory do
       iex> mem = VFS.Memory.new(%{"/a.txt" => "hi"})
       iex> Map.fetch!(mem.tree, "/a.txt")
       "hi"
+
+      iex> VFS.Memory.new(%{"/a" => "f", "/a/b" => "c"})
+      ** (ArgumentError) VFS.Memory seed has conflicting paths: "/a" is a file but "/a/b" places a child under it. A path cannot be both a file and a directory.
   """
   @spec new(%{optional(String.t()) => binary}) :: t()
   def new(initial \\ %{}) when is_map(initial) do
+    normalized =
+      for {path, content} <- initial, into: %{} do
+        {VFS.Path.normalize(path), content}
+      end
+
+    :ok = validate_seed!(normalized)
+
     now = DateTime.utc_now()
 
-    Enum.reduce(initial, %__MODULE__{}, fn {path, content}, mem ->
-      norm = VFS.Path.normalize(path)
-
+    Enum.reduce(normalized, %__MODULE__{}, fn {path, content}, mem ->
       %{
         mem
-        | tree: Map.put(mem.tree, norm, content),
-          mtimes: Map.put(mem.mtimes, norm, now)
+        | tree: Map.put(mem.tree, path, content),
+          mtimes: Map.put(mem.mtimes, path, now)
       }
     end)
+  end
+
+  # Reject seeds that would produce contradictory state.
+  #
+  # 1. Root key as a file: `/` is always a directory.
+  # 2. File / descendant collision: if path A is a file and path B is
+  #    under A (i.e. starts with `A/`), A is simultaneously a file and
+  #    a directory, which `stat` and `readdir` cannot agree on.
+  defp validate_seed!(normalized) do
+    if Map.has_key?(normalized, "/") do
+      raise ArgumentError,
+            "VFS.Memory seed cannot contain \"/\" as a file — root is always a directory."
+    end
+
+    paths = Map.keys(normalized)
+
+    Enum.each(paths, fn parent ->
+      prefix = parent <> "/"
+
+      Enum.each(paths, fn child ->
+        if child != parent and String.starts_with?(child, prefix) do
+          raise ArgumentError,
+                "VFS.Memory seed has conflicting paths: #{inspect(parent)} is a file but " <>
+                  "#{inspect(child)} places a child under it. A path cannot be both a file " <>
+                  "and a directory."
+        end
+      end)
+    end)
+
+    :ok
   end
 end
 
@@ -334,10 +385,25 @@ defimpl VFS.Mountable, for: VFS.Memory do
     end
   end
 
-  defp slice_lines(content, first, last) when last == :end or is_integer(last) do
+  # `last == :end` is always valid — read to EOF.
+  defp slice_lines(content, first, :end) do
     lines = String.split(content, "\n")
-    last_idx = if last == :end, do: length(lines), else: last
-    sliced = lines |> Enum.slice((first - 1)..(last_idx - 1)//1) |> Enum.join("\n")
+    sliced = lines |> Enum.slice((first - 1)..(length(lines) - 1)//1) |> Enum.join("\n")
+    {:ok, sliced}
+  end
+
+  # Integer last must be >= first AND >= 1. Anything else is :einval —
+  # specifically `last < first` and `last < 1`. We validate this loudly
+  # rather than letting it fall through to `Enum.slice/2`'s range
+  # semantics, which interpret negative indices as offsets-from-end and
+  # would silently return surprising slices to a caller who passed a
+  # malformed range. For LLM agent tools that retrieve precise line
+  # context, silent-wrong is the worst possible behavior; loud :einval
+  # lets the agent pivot.
+  defp slice_lines(content, first, last)
+       when is_integer(last) and last >= first and last >= 1 do
+    lines = String.split(content, "\n")
+    sliced = lines |> Enum.slice((first - 1)..(last - 1)//1) |> Enum.join("\n")
     {:ok, sliced}
   end
 

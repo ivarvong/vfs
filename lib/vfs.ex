@@ -454,8 +454,8 @@ defimpl VFS.Mountable, for: VFS do
     inner_streams =
       Enum.flat_map(vfs.mounts, fn {mp, backend} ->
         case VFS.__relate_mount__(p, mp) do
-          :include -> [walk_and_prefix(backend, "/", mp, opts)]
-          {:descend, sub} -> [walk_and_prefix(backend, sub, mp, opts)]
+          :include -> [walk_and_prefix(vfs, backend, "/", mp, opts)]
+          {:descend, sub} -> [walk_and_prefix(vfs, backend, sub, mp, opts)]
           :unrelated -> []
         end
       end)
@@ -515,11 +515,26 @@ defimpl VFS.Mountable, for: VFS do
     Stream.concat(Enum.sort(synthetic), real)
   end
 
-  defp walk_and_prefix(backend, sub, mp, opts) do
+  # Walk a single mount and prefix its emissions with the mountpoint,
+  # then drop any emission that the mount-table's longest-prefix routing
+  # would route to a *different* mount. This is the shadowing filter:
+  # if `/` is mounted with `/a/old` and `/a` is mounted separately,
+  # `/a/old` is emitted by the root mount but unreachable via point
+  # lookup (read_file routes to the `/a` mount, which doesn't have
+  # "old"). Walk must respect that — the namespace seen by walk has to
+  # equal the namespace seen by read_file.
+  defp walk_and_prefix(vfs, backend, sub, mp, opts) do
     backend
     |> VFS.Mountable.walk(sub, opts)
-    |> Stream.map(fn {sub_path, stat} ->
-      {VFS.Path.join(mp, VFS.__strip_leading__(sub_path)), stat}
+    |> Stream.flat_map(fn {sub_path, stat} ->
+      full = VFS.Path.join(mp, VFS.__strip_leading__(sub_path))
+
+      case VFS.__resolve__(vfs, full) do
+        {:ok, ^mp, _resolved_sub, _backend} -> [{full, stat}]
+        # Resolves to a different mount → shadowed; drop.
+        # Resolves to :no_mount can't happen here since `mp` covers it.
+        _ -> []
+      end
     end)
   end
 
