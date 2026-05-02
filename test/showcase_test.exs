@@ -309,12 +309,17 @@ defmodule VFS.ShowcaseTest do
     test "telemetry — every public op emits start/stop" do
       # The library has no opinion about logging, OTel, or metrics —
       # it just emits :telemetry events. Consumers route them.
+      #
+      # Module-qualified capture (`&__MODULE__.handle_telemetry/4`)
+      # avoids telemetry's local-function performance warning.
+      pid = self()
+
       :ok =
         :telemetry.attach(
           "showcase",
           [:vfs, :read_file, :stop],
-          fn _ev, m, meta, _ -> send(self(), {:read_done, m, meta}) end,
-          nil
+          &__MODULE__.handle_telemetry/4,
+          pid
         )
 
       fs =
@@ -328,6 +333,13 @@ defmodule VFS.ShowcaseTest do
 
       :telemetry.detach("showcase")
     end
+  end
+
+  # ── telemetry handler (must be a module-qualified function, not a closure) ──
+
+  @doc false
+  def handle_telemetry(_event, measurements, metadata, pid) do
+    send(pid, {:read_done, measurements, metadata})
   end
 
   # ── helpers used in section 2 ──────────────────────────────────────────

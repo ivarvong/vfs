@@ -11,19 +11,21 @@ defmodule VFS.StreamOptionsTest do
   alias VFS.StreamOptions
 
   describe "apply/2 guard rejects malformed inputs" do
+    # `apply/3` is used to defeat compiler type narrowing — these
+    # tests verify the runtime guard, not the static contract.
     test "non-binary content raises FunctionClauseError" do
       assert_raise FunctionClauseError, fn ->
-        StreamOptions.apply(:not_a_binary, [])
+        apply(StreamOptions, :apply, [:not_a_binary, []])
       end
 
       assert_raise FunctionClauseError, fn ->
-        StreamOptions.apply(123, [])
+        apply(StreamOptions, :apply, [123, []])
       end
     end
 
     test "non-list opts raises FunctionClauseError" do
       assert_raise FunctionClauseError, fn ->
-        StreamOptions.apply("content", %{chunk_size: 64})
+        apply(StreamOptions, :apply, ["content", %{chunk_size: 64}])
       end
     end
   end

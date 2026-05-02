@@ -34,18 +34,24 @@ defmodule VFS.StatTest do
   end
 
   test "regular/3 guard rejects non-integer size" do
+    # `apply/3` is used to defeat compiler type narrowing — we are
+    # explicitly testing that the runtime guard rejects bad inputs.
+    now = DateTime.utc_now()
+
     assert_raise FunctionClauseError, fn ->
-      VFS.Stat.regular(1.5, DateTime.utc_now())
+      apply(VFS.Stat, :regular, [1.5, now])
     end
 
     assert_raise FunctionClauseError, fn ->
-      VFS.Stat.regular("100", DateTime.utc_now())
+      apply(VFS.Stat, :regular, ["100", now])
     end
   end
 
   test "regular/3 guard rejects negative size" do
+    now = DateTime.utc_now()
+
     assert_raise FunctionClauseError, fn ->
-      VFS.Stat.regular(-1, DateTime.utc_now())
+      apply(VFS.Stat, :regular, [-1, now])
     end
   end
 end

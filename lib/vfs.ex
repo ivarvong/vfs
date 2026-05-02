@@ -268,6 +268,8 @@ defmodule VFS do
   # ── internal: mount routing ───────────────────────────────────────────────
 
   @doc false
+  @spec __resolve__(t(), VPath.t()) ::
+          {:ok, VPath.t(), VPath.t(), Mountable.t()} | :no_mount
   def __resolve__(%__MODULE__{mounts: mounts}, path) do
     Enum.find_value(mounts, :no_mount, fn {mp, backend} ->
       case VPath.relative_to(path, mp) do
@@ -278,17 +280,20 @@ defmodule VFS do
   end
 
   @doc false
+  @spec __put_mount__(t(), VPath.t(), Mountable.t()) :: t()
   def __put_mount__(%__MODULE__{mounts: mounts} = vfs, mp, new_backend) do
     %{vfs | mounts: Enum.map(mounts, &if(elem(&1, 0) == mp, do: {mp, new_backend}, else: &1))}
   end
 
   @doc false
+  @spec __synthetic_dir__(t(), VPath.t()) :: boolean
   def __synthetic_dir__(%__MODULE__{mounts: mounts}, path) do
     prefix = if path == "/", do: "/", else: path <> "/"
     Enum.any?(mounts, fn {mp, _} -> mp != path and String.starts_with?(mp, prefix) end)
   end
 
   @doc false
+  @spec __synthetic_children__(t(), VPath.t()) :: [String.t()]
   def __synthetic_children__(%__MODULE__{mounts: mounts}, path) do
     prefix = if path == "/", do: "/", else: path <> "/"
 
@@ -343,13 +348,17 @@ defmodule VFS do
   # ── helpers used by the defimpl below ────────────────────────────────────
 
   @doc false
+  @spec __strip_leading__(VPath.t()) :: String.t()
   def __strip_leading__("/" <> rest), do: rest
 
   @doc false
+  @spec __ensure_trailing_slash__(VPath.t()) :: String.t()
   def __ensure_trailing_slash__("/"), do: "/"
   def __ensure_trailing_slash__(p), do: p <> "/"
 
   @doc false
+  @spec __relate_mount__(VPath.t(), VPath.t()) ::
+          :include | :unrelated | {:descend, VPath.t()}
   def __relate_mount__(root, mp) do
     cond do
       root == mp -> :include
@@ -359,6 +368,7 @@ defmodule VFS do
     end
   end
 
+  @spec __descend__(VPath.t(), VPath.t()) :: {:descend, VPath.t()}
   defp __descend__(root, mp) do
     {:ok, sub} = VPath.relative_to(root, mp)
     {:descend, sub}
