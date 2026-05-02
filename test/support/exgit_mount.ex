@@ -150,7 +150,13 @@ defimpl VFS.Mountable, for: VFS.Test.ExgitMount do
   end
 
   def materialize(%ExgitMount{repo: repo, ref: ref} = mount, _opts) do
-    case ExgitFS.prefetch(repo, ref) do
+    # `Exgit.Repository.materialize/2` converts a lazy partial-clone repo
+    # to eager mode (fetches all referenced blobs into the local store
+    # AND flips the mode flag). `Exgit.FS.prefetch/3` only populates the
+    # cache without flipping the mode, which means subsequent `walk` /
+    # `grep` ops still error with `:require_eager!`. We want the full
+    # conversion here so `VFS.walk` Just Works after `VFS.materialize`.
+    case Exgit.Repository.materialize(repo, ref) do
       {:ok, repo2} ->
         {:ok, %{mount | repo: repo2}}
 
