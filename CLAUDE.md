@@ -207,7 +207,25 @@ mix format                 # auto-fix + --migrate for deprecated forms
 mix credo
 mix dialyzer
 mix docs                   # ex_doc — first sentence of @moduledoc lands on hex.pm, write it deliberately
+mix vfs.mutate             # mutation testing — run periodically, NOT in mix check (slow)
+mix vfs.mutate --file lib/vfs/memory.ex  # single file
 ```
+
+## Mutation testing
+
+We ship a custom `mix vfs.mutate` task (purposefully simple — text-based,
+~150 lines). It applies one mutation at a time from a curated rule set
+(`>=` ↔ `>`, `<=` ↔ `<`, `==` ↔ `!=`, `&&` ↔ `||`, `and` ↔ `or`, etc.),
+runs the test suite, and reports survivors. Surviving mutations indicate
+test gaps — code paths that ran but weren't actually verified.
+
+Run periodically (not on every commit — it's ~1.5 min per file). Healthy
+kill rate: **>90%** with no real-bug survivors. Current rate is 93%; the
+3 remaining are a string-literal false positive and two equivalent
+mutations (different code, same observable behavior).
+
+Mutation testing is the cure for "100% line coverage but bugs slip
+through" — the lines run, but no assertion catches the wrong answer.
 
 ## When in doubt
 

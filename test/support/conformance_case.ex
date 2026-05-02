@@ -173,6 +173,15 @@ defmodule VFS.ConformanceCase do
           end
         end
 
+        test ":byte_range with start: 0 reads from the beginning" do
+          if writable?() do
+            fs = fresh()
+            {:ok, fs} = VFS.write_file(fs, "/x", "abcdef")
+            {:ok, stream, _fs} = VFS.stream_read(fs, "/x", byte_range: {0, 3})
+            assert stream |> Enum.to_list() |> IO.iodata_to_binary() == "abc"
+          end
+        end
+
         test ":byte_range past EOF clamps to available bytes" do
           if writable?() do
             fs = fresh()
@@ -182,12 +191,30 @@ defmodule VFS.ConformanceCase do
           end
         end
 
+        test ":byte_range with start at exactly EOF yields empty" do
+          if writable?() do
+            fs = fresh()
+            {:ok, fs} = VFS.write_file(fs, "/x", "abc")
+            {:ok, stream, _fs} = VFS.stream_read(fs, "/x", byte_range: {3, 5})
+            assert Enum.to_list(stream) == []
+          end
+        end
+
         test ":line_range returns the requested 1-based inclusive line slice" do
           if writable?() do
             fs = fresh()
             {:ok, fs} = VFS.write_file(fs, "/x", "one\ntwo\nthree\nfour\n")
             {:ok, stream, _fs} = VFS.stream_read(fs, "/x", line_range: {2, 3})
             assert stream |> Enum.to_list() |> IO.iodata_to_binary() == "two\nthree"
+          end
+        end
+
+        test ":line_range with first: 1 reads from the beginning" do
+          if writable?() do
+            fs = fresh()
+            {:ok, fs} = VFS.write_file(fs, "/x", "one\ntwo\nthree\n")
+            {:ok, stream, _fs} = VFS.stream_read(fs, "/x", line_range: {1, 1})
+            assert stream |> Enum.to_list() |> IO.iodata_to_binary() == "one"
           end
         end
 
@@ -327,8 +354,20 @@ defmodule VFS.ConformanceCase do
               |> Enum.map(&elem(&1, 0))
               |> Enum.sort()
 
-            assert "/a" in paths
-            refute "/d/sub/c" in paths
+            # max_depth=1 means: descend exactly 1 level into the tree.
+            # We yield depth-1 entries (immediate children of /) but not
+            # deeper. /a is depth 1; /d/b is depth 2; /d/sub/c is depth 3.
+            assert paths == ["/a"]
+          end
+        end
+
+        test "max_depth: 0 yields no files" do
+          if writable?() do
+            fs = fresh()
+            {:ok, fs} = VFS.write_file(fs, "/a", "")
+            {:ok, fs} = VFS.write_file(fs, "/b/c", "")
+
+            assert fs |> VFS.walk("/", max_depth: 0) |> Enum.to_list() == []
           end
         end
       end

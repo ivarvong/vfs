@@ -124,6 +124,75 @@ defmodule VFS.PathTest do
     end
   end
 
+  describe "fuzz / adversarial properties" do
+    @moduletag :fuzz
+
+    property "normalize never crashes on arbitrary UTF-8 input starting with /" do
+      check all rest <- string(:utf8, max_length: 200),
+                max_runs: 1_000 do
+        result = VFS.Path.normalize("/" <> rest)
+        assert is_binary(result)
+        assert String.starts_with?(result, "/")
+      end
+    end
+
+    property "normalize never crashes on arbitrary printable ASCII starting with /" do
+      check all rest <- string(:printable, max_length: 200),
+                max_runs: 1_000 do
+        result = VFS.Path.normalize("/" <> rest)
+        assert is_binary(result)
+        assert String.starts_with?(result, "/")
+      end
+    end
+
+    property "normalized output never contains . or .. segments" do
+      # Security invariant. If a malicious caller passes /../../etc/passwd,
+      # the normalized form must not retain any .. that consumers might
+      # interpret as parent traversal.
+      check all parts <-
+                  list_of(member_of(["foo", "..", ".", "bar", "x", "y", ""]),
+                    min_length: 0,
+                    max_length: 30
+                  ),
+                max_runs: 500 do
+        n = VFS.Path.normalize("/" <> Enum.join(parts, "/"))
+        segs = String.split(n, "/", trim: true)
+
+        refute Enum.any?(segs, &(&1 in [".", ".."])),
+               "found . or .. in #{n} from input parts #{inspect(parts)}"
+      end
+    end
+
+    property "output never escapes root regardless of how many .. are in the input" do
+      check all dotdot_count <- integer(0..50),
+                tail <- list_of(member_of(["foo", "bar"]), min_length: 0, max_length: 5),
+                max_runs: 200 do
+        prefix = String.duplicate("../", dotdot_count)
+        suffix = Enum.join(tail, "/")
+        n = VFS.Path.normalize("/" <> prefix <> suffix)
+        assert String.starts_with?(n, "/")
+        # Whatever the depth of `..`, the result must be `/` + the tail or shallower.
+        assert String.split(n, "/", trim: true) |> length() <= length(tail)
+      end
+    end
+
+    property "normalize length cannot exceed input length (no unbounded expansion)" do
+      check all rest <- string(:printable, max_length: 200), max_runs: 500 do
+        n = VFS.Path.normalize("/" <> rest)
+        assert byte_size(n) <= byte_size("/" <> rest) + 1
+      end
+    end
+
+    property "normalize always rejects non-absolute input via ArgumentError" do
+      check all bad <- one_of([constant(""), string(:printable, max_length: 50)]),
+                # explicitly remove cases that start with /
+                not String.starts_with?(bad, "/"),
+                max_runs: 500 do
+        assert_raise ArgumentError, fn -> VFS.Path.normalize(bad) end
+      end
+    end
+  end
+
   defp random_absolute_path do
     list_of(
       member_of(["foo", "bar", "baz", ".", "..", "x", "y"]),

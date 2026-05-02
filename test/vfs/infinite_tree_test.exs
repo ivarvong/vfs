@@ -66,4 +66,52 @@ defmodule VFS.InfiniteTreeTest do
 
     assert length(matches) == 10
   end
+
+  describe "laziness verification" do
+    test "Enum.take/2 over an infinite walk returns within a bounded time" do
+      # If walk were eager (or accumulated greedily), this would never return.
+      # The Task with a 5-second yield is the canary.
+      task =
+        Task.async(fn ->
+          InfiniteTree.new() |> VFS.Mountable.walk("/", []) |> Enum.take(100)
+        end)
+
+      assert {:ok, paths} = Task.yield(task, 5_000) || Task.shutdown(task, :brutal_kill)
+      assert length(paths) == 100
+    end
+
+    test "consuming 1k entries does not retain them in memory after counting" do
+      # Note: this tree's depth grows linearly with entries consumed
+      # (each step adds /subdir to the path), so per-step work is O(depth).
+      # 1k entries is sufficient to surface accidental retention; 10k+
+      # would be quadratic in path-string work without adding diagnostic value.
+      :erlang.garbage_collect(self())
+      before = process_memory_words()
+
+      count =
+        InfiniteTree.new()
+        |> VFS.Mountable.walk("/", [])
+        |> Stream.take(1_000)
+        |> Enum.count()
+
+      :erlang.garbage_collect(self())
+      after_words = process_memory_words()
+
+      assert count == 1_000
+
+      # If walk accidentally retained all visited {path, stat} entries plus
+      # the work-queue, growth would be hundreds of KB to MBs. With proper
+      # laziness and a bounded work queue, residual memory after Enum.count
+      # + GC stays under 1MB even with depth-linear path growth.
+      growth_bytes = (after_words - before) * :erlang.system_info(:wordsize)
+
+      assert growth_bytes < 1_000_000,
+             "expected <1MB residual memory growth, got #{growth_bytes} bytes"
+    end
+  end
+
+  defp process_memory_words do
+    {:memory, m} = :erlang.process_info(self(), :memory)
+    div(m, :erlang.system_info(:wordsize))
+  end
 end

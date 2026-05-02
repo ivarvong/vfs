@@ -84,6 +84,18 @@ defmodule VFS.MemoryTest do
       assert {:error, %VFS.Error{kind: :einval}} = VFS.stream_read(fs, "/x", byte_range: {-1, 5})
     end
 
+    test "chunk_size of 0 returns :einval error" do
+      fs = VFS.Memory.new()
+      {:ok, fs} = VFS.write_file(fs, "/x", "abc")
+      assert {:error, %VFS.Error{kind: :einval}} = VFS.stream_read(fs, "/x", chunk_size: 0)
+    end
+
+    test "negative chunk_size returns :einval error" do
+      fs = VFS.Memory.new()
+      {:ok, fs} = VFS.write_file(fs, "/x", "abc")
+      assert {:error, %VFS.Error{kind: :einval}} = VFS.stream_read(fs, "/x", chunk_size: -1)
+    end
+
     test "byte_range start past EOF yields an empty stream" do
       fs = VFS.Memory.new()
       {:ok, fs} = VFS.write_file(fs, "/x", "abc")

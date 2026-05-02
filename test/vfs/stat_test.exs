@@ -32,4 +32,20 @@ defmodule VFS.StatTest do
       struct!(VFS.Stat, type: :regular, size: 0)
     end
   end
+
+  test "regular/3 guard rejects non-integer size" do
+    assert_raise FunctionClauseError, fn ->
+      VFS.Stat.regular(1.5, DateTime.utc_now())
+    end
+
+    assert_raise FunctionClauseError, fn ->
+      VFS.Stat.regular("100", DateTime.utc_now())
+    end
+  end
+
+  test "regular/3 guard rejects negative size" do
+    assert_raise FunctionClauseError, fn ->
+      VFS.Stat.regular(-1, DateTime.utc_now())
+    end
+  end
 end

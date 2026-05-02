@@ -125,9 +125,9 @@ defimpl VFS.Mountable, for: VFS.Memory do
 
     case Map.fetch(mem.tree, p) do
       {:ok, content} ->
-        with {:ok, sliced} <- apply_byte_range(content, opts),
+        with {:ok, chunk_size} <- validate_chunk_size(opts),
+             {:ok, sliced} <- apply_byte_range(content, opts),
              {:ok, sliced} <- apply_line_range(sliced, opts) do
-          chunk_size = Keyword.get(opts, :chunk_size, 64 * 1024)
           {:ok, chunk_stream(sliced, chunk_size), mem}
         else
           {:error, reason} -> {:error, Error.new(reason, path: p)}
@@ -143,17 +143,22 @@ defimpl VFS.Mountable, for: VFS.Memory do
   def write_file(%Memory{} = mem, path, content, _opts) when is_binary(content) do
     p = VFS.Path.normalize(path)
 
-    if directory?(mem, p) do
-      {:error, Error.new(:eisdir, path: p)}
-    else
-      now = DateTime.utc_now()
+    cond do
+      directory?(mem, p) ->
+        {:error, Error.new(:eisdir, path: p)}
 
-      {:ok,
-       %{
-         mem
-         | tree: Map.put(mem.tree, p, content),
-           mtimes: Map.put(mem.mtimes, p, now)
-       }}
+      ancestor_is_file?(mem, p) ->
+        {:error, Error.new(:enotdir, path: p)}
+
+      true ->
+        now = DateTime.utc_now()
+
+        {:ok,
+         %{
+           mem
+           | tree: Map.put(mem.tree, p, content),
+             mtimes: Map.put(mem.mtimes, p, now)
+         }}
     end
   end
 
@@ -167,6 +172,9 @@ defimpl VFS.Mountable, for: VFS.Memory do
 
       MapSet.member?(mem.dirs, p) ->
         {:error, Error.new(:eexist, path: p)}
+
+      ancestor_is_file?(mem, p) ->
+        {:error, Error.new(:enotdir, path: p)}
 
       parents? ->
         {:ok, mkdir_p(mem, p)}
@@ -221,6 +229,17 @@ defimpl VFS.Mountable, for: VFS.Memory do
     Enum.any?(paths, &String.starts_with?(&1, prefix))
   end
 
+  defp ancestor_is_file?(%Memory{tree: tree}, path) do
+    path |> ancestors() |> Enum.any?(&Map.has_key?(tree, &1))
+  end
+
+  defp ancestors("/"), do: []
+
+  defp ancestors(path) do
+    parent = VFS.Path.dirname(path)
+    [parent | ancestors(parent)]
+  end
+
   defp children_under(paths, prefix) do
     Enum.flat_map(paths, fn p ->
       if p != prefix and String.starts_with?(p, prefix) do
@@ -243,11 +262,10 @@ defimpl VFS.Mountable, for: VFS.Memory do
     parent = VFS.Path.dirname(path)
     mem = mkdir_p(mem, parent)
 
-    if MapSet.member?(mem.dirs, path) or directory?(mem, path) do
-      mem
-    else
-      put_dir(mem, path)
-    end
+    # `directory?/2` already covers MapSet membership; the redundant
+    # check was kept earlier for "obvious correctness" — removing it
+    # to keep the test suite tight (mutation testing flagged the OR).
+    if directory?(mem, path), do: mem, else: put_dir(mem, path)
   end
 
   defp rm_recursive(%Memory{} = mem, path) do
@@ -272,7 +290,14 @@ defimpl VFS.Mountable, for: VFS.Memory do
     |> MapSet.new()
   end
 
-  # ── byte_range / line_range slicing ──
+  # ── option validation + slicing ──
+
+  defp validate_chunk_size(opts) do
+    case Keyword.get(opts, :chunk_size, 64 * 1024) do
+      n when is_integer(n) and n > 0 -> {:ok, n}
+      _ -> {:error, :einval}
+    end
+  end
 
   defp apply_byte_range(content, opts) do
     case Keyword.fetch(opts, :byte_range) do
