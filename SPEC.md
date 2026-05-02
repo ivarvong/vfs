@@ -14,13 +14,16 @@ A new library that replaces `feat/mountable-virtual-filesystem-core` in `just_ba
 > | Dispatch substrate | Single protocol, not behaviours |
 > | Reads thread state back | Yes (every op returns updated impl) |
 > | Mount-table-as-backend | `%VFS{}` itself implements the protocol |
-> | Primary read API | Lazy: `stream_read/3` (Enumerable). `read_file/2` is a derived helper. |
-> | Streaming/pushdown | First-class in v1 (`stream_read`, `walk`, `glob`, `grep`, `materialize`) |
+> | Primary read API | Lazy: `stream_read/3` (Enumerable). `read_file/2` is a derived helper on `VFS`, not a protocol callback. |
+> | Streaming/pushdown | First-class in v1 (`stream_read`, `walk`, `materialize`) |
 > | Stat shape | `%VFS.Stat{type, size, mtime, mode}` — own struct, shaped to virtual-FS semantics. Not `File.Stat` (OS-fs concepts like `inode`/`uid`/`gid` don't apply to git blobs or S3 objects). Follows stdlib `type: atom()` convention. |
+> | Errors | Structured `%VFS.Error{kind, path, mount, message}` exception. Pattern match on `:kind` for control flow. Kind atoms follow POSIX (`:enoent`, `:eisdir`, ...). |
 > | Read-side primitives | `walk/3` + `stream_read/3`. Sufficient for any bulk operation: grep, mapreduce, fulltext, sync, dedup, backup. |
-> | Higher-order ops | Helpers in `VFS` module (`grep`, `glob`), not protocol ops. Op-specific result structs (e.g. `%VFS.Match{}`) explicitly avoided in the core. |
+> | Higher-order ops | Out of v1 core. `grep`/`glob`/`cp`/`mv` belong in a companion package or consumer code; the library stays small on purpose. |
 > | Cross-backend pushdown | Deferred to optional secondary protocols (e.g. `VFS.Searchable`, `VFS.ContentAddressed`) when a pattern recurs. v1 has none. |
 > | Read/write protocol | Single combined protocol; not split. Read-only-ness is a `capabilities/1` property. |
+> | Runtime deps | `:telemetry` only (effectively-stdlib in Elixir; required for the agent-loop observability story). |
+> | Cut from v0.1 protocol | `lstat`, `readlink`, `symlink`, `link`, `chmod`, `append_file` — no v1 backend uses them; YAGNI. Add when there's a real consumer. |
 > | `VFS.Git` | **Not in this library.** Lives as `defimpl VFS.Mountable, for: Exgit.Repository` inside `:exgit`. |
 > | `VFS.Overlay` / `VFS.ReadOnly` | **Not stock impls.** Documented as worked examples; users compose when needed. |
 > | S3 backend | Deferred from v1 |
@@ -327,7 +330,7 @@ defmodule VFS.Skeleton do
 end
 ```
 
-The default `walk` lives in `VFS.Default.walk/3` — a `Stream.resource` that recursively `readdir`s. The `VFS.grep/4` and `VFS.glob/3` helpers (in the `VFS` module, not the protocol) compose on top of `walk` + `stream_read` + line scan. The cache-eviction caveat (cache state populated *during* enumeration doesn't escape the stream) is documented below; `materialize/2` is the lever for callers who need it pre-populated.
+The default `walk` lives in `VFS.Default.walk/3` — a `Stream.resource` that recursively `readdir`s. The `grep` and `glob` helpers (in the `VFS` module, not the protocol) compose on top of `walk` + `stream_read` + line scan. The cache-eviction caveat (cache state populated *during* enumeration doesn't escape the stream) is documented below; `materialize/2` is the lever for callers who need it pre-populated.
 
 ### Example: how `:exgit` ships a defimpl (lives in exgit, not vfs)
 
@@ -394,7 +397,7 @@ The protocol's read-side surface is built around two primitives:
 
 Together these are sufficient for any bulk read-side operation a consumer wants to build. The motivating scenario was "1M-file grep on an exgit-backed mount," but the primitives weren't designed for grep — they're designed for *any* bulk traversal that needs to stay memory-bounded and lazy on the per-file axis. Below: three worked examples showing the same primitives compose into different consumer-side operations.
 
-### Worked example 1: `VFS.grep/4` (in the `VFS` helper module)
+### Worked example 1: `grep` (in the `VFS` helper module)
 
 ```elixir
 def grep(fs, root, pattern, opts \\ []) do
@@ -767,7 +770,7 @@ These were considered and deliberately punted; flagging here so the reviewer doe
 - [ ] `VFS.Skeleton` — `use`-able macro that wires defaults + `:enotsup`/`:erofs` for unsupported optional ops
 - [ ] `VFS.Memory` — in-memory backend (port + simplification of `JustBash.FS.InMemoryFS`)
 - [ ] `%VFS{}` mount-table struct + `defimpl VFS.Mountable, for: VFS` (port of existing routing logic from `feat/mountable-virtual-filesystem-core`)
-- [ ] `VFS.grep/4` and `VFS.glob/3` helpers (composed from `walk` + `stream_read`; return plain-tuple streams)
+- [ ] `grep` and `glob` helpers (composed from `walk` + `stream_read`; return plain-tuple streams)
 - [ ] Conformance test suite parametrized over impls — every backend runs the same test set
 - [ ] README documenting the worked-example patterns (CoW overlay, read-only wrapper) so users know how to compose
 

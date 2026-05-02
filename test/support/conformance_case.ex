@@ -7,21 +7,21 @@ defmodule VFS.ConformanceCase do
   #     defmodule VFS.MemoryTest do
   #       use VFS.ConformanceCase,
   #         backend: fn -> VFS.Memory.new() end,
-  #         capabilities: [:read, :write, :chmod, :append]
+  #         capabilities: [:read, :write]
   #     end
   #
-  # The harness exercises every behavioral contract documented in
-  # `VFS.Mountable`. Backends with reduced capabilities (e.g. read-only)
-  # pass a different `:capabilities` list and the macro skips tests that
-  # don't apply.
+  # Backends with reduced capabilities (e.g. read-only) pass a different
+  # `:capabilities` list and the macro skips tests that don't apply.
 
   defmacro __using__(opts) do
     factory = Keyword.fetch!(opts, :backend)
-    capabilities = Keyword.get(opts, :capabilities, [:read, :write, :chmod, :append])
+    capabilities = Keyword.get(opts, :capabilities, [:read, :write])
 
     quote location: :keep do
       use ExUnit.Case, async: true
       use ExUnitProperties
+
+      alias VFS.Error
 
       @__backend_caps__ unquote(capabilities)
 
@@ -31,9 +31,8 @@ defmodule VFS.ConformanceCase do
 
       describe "stat/2" do
         test "regular file returns :regular type with correct size" do
-          fs = fresh()
-
           if writable?() do
+            fs = fresh()
             {:ok, fs} = VFS.write_file(fs, "/a", "hello")
             {:ok, stat, _fs} = VFS.stat(fs, "/a")
             assert stat.type == :regular
@@ -42,14 +41,13 @@ defmodule VFS.ConformanceCase do
           end
         end
 
-        test "non-existent path returns :enoent" do
-          assert {:error, :enoent} = VFS.stat(fresh(), "/does/not/exist")
+        test "non-existent path returns :enoent error struct" do
+          assert {:error, %Error{kind: :enoent}} = VFS.stat(fresh(), "/does/not/exist")
         end
 
         test "implicit directory returns :directory" do
-          fs = fresh()
-
           if writable?() do
+            fs = fresh()
             {:ok, fs} = VFS.write_file(fs, "/a/b/c", "x")
             {:ok, stat, _fs} = VFS.stat(fs, "/a")
             assert stat.type == :directory
@@ -79,9 +77,8 @@ defmodule VFS.ConformanceCase do
 
       describe "readdir/2" do
         test "lists immediate children sorted" do
-          fs = fresh()
-
           if writable?() do
+            fs = fresh()
             {:ok, fs} = VFS.write_file(fs, "/b", "1")
             {:ok, fs} = VFS.write_file(fs, "/a", "2")
             {:ok, fs} = VFS.write_file(fs, "/c", "3")
@@ -91,9 +88,8 @@ defmodule VFS.ConformanceCase do
         end
 
         test "subdirectory listing only includes immediate children" do
-          fs = fresh()
-
           if writable?() do
+            fs = fresh()
             {:ok, fs} = VFS.write_file(fs, "/dir/a", "1")
             {:ok, fs} = VFS.write_file(fs, "/dir/sub/b", "2")
             {:ok, names, _fs} = VFS.readdir(fs, "/dir")
@@ -101,21 +97,20 @@ defmodule VFS.ConformanceCase do
           end
         end
 
-        test "non-existent dir returns :enoent" do
-          assert {:error, :enoent} = VFS.readdir(fresh(), "/nope")
+        test "non-existent dir returns :enoent error" do
+          assert {:error, %Error{kind: :enoent}} = VFS.readdir(fresh(), "/nope")
         end
 
-        test "regular file returns :enotdir" do
-          fs = fresh()
-
+        test "regular file returns :enotdir error" do
           if writable?() do
+            fs = fresh()
             {:ok, fs} = VFS.write_file(fs, "/file", "")
-            assert {:error, :enotdir} = VFS.readdir(fs, "/file")
+            assert {:error, %Error{kind: :enotdir}} = VFS.readdir(fs, "/file")
           end
         end
       end
 
-      describe "read_file/2 + write_file/3" do
+      describe "read_file/2 (derived) + write_file/3" do
         test "round-trips arbitrary bytes" do
           if writable?() do
             fs = fresh()
@@ -134,15 +129,15 @@ defmodule VFS.ConformanceCase do
           end
         end
 
-        test "non-existent path returns :enoent" do
-          assert {:error, :enoent} = VFS.read_file(fresh(), "/missing")
+        test "non-existent path returns :enoent error" do
+          assert {:error, %Error{kind: :enoent}} = VFS.read_file(fresh(), "/missing")
         end
 
-        test "directory returns :eisdir" do
+        test "directory returns :eisdir error" do
           if writable?() do
             fs = fresh()
             {:ok, fs} = VFS.write_file(fs, "/d/x", "")
-            assert {:error, :eisdir} = VFS.read_file(fs, "/d")
+            assert {:error, %Error{kind: :eisdir}} = VFS.read_file(fs, "/d")
           end
         end
       end
@@ -169,8 +164,44 @@ defmodule VFS.ConformanceCase do
           end
         end
 
-        test "non-existent returns :enoent" do
-          assert {:error, :enoent} = VFS.stream_read(fresh(), "/missing")
+        test ":byte_range option returns only the requested slice" do
+          if writable?() do
+            fs = fresh()
+            {:ok, fs} = VFS.write_file(fs, "/x", "abcdefghij")
+            {:ok, stream, _fs} = VFS.stream_read(fs, "/x", byte_range: {2, 4})
+            assert stream |> Enum.to_list() |> IO.iodata_to_binary() == "cdef"
+          end
+        end
+
+        test ":byte_range past EOF clamps to available bytes" do
+          if writable?() do
+            fs = fresh()
+            {:ok, fs} = VFS.write_file(fs, "/x", "abc")
+            {:ok, stream, _fs} = VFS.stream_read(fs, "/x", byte_range: {1, 100})
+            assert stream |> Enum.to_list() |> IO.iodata_to_binary() == "bc"
+          end
+        end
+
+        test ":line_range returns the requested 1-based inclusive line slice" do
+          if writable?() do
+            fs = fresh()
+            {:ok, fs} = VFS.write_file(fs, "/x", "one\ntwo\nthree\nfour\n")
+            {:ok, stream, _fs} = VFS.stream_read(fs, "/x", line_range: {2, 3})
+            assert stream |> Enum.to_list() |> IO.iodata_to_binary() == "two\nthree"
+          end
+        end
+
+        test ":line_range with :end reads to EOF" do
+          if writable?() do
+            fs = fresh()
+            {:ok, fs} = VFS.write_file(fs, "/x", "a\nb\nc\n")
+            {:ok, stream, _fs} = VFS.stream_read(fs, "/x", line_range: {2, :end})
+            assert stream |> Enum.to_list() |> IO.iodata_to_binary() == "b\nc\n"
+          end
+        end
+
+        test "non-existent returns :enoent error" do
+          assert {:error, %Error{kind: :enoent}} = VFS.stream_read(fresh(), "/missing")
         end
       end
 
@@ -183,32 +214,13 @@ defmodule VFS.ConformanceCase do
             {:ok, "ok", _fs} = VFS.read_file(fs, "/dir/x")
           end
 
-          test "writing onto a directory returns :eisdir" do
+          test "writing onto a directory returns :eisdir error" do
             fs = fresh()
             {:ok, fs} = VFS.write_file(fs, "/dir/x", "y")
-            assert {:error, :eisdir} = VFS.write_file(fs, "/dir", "no")
+            assert {:error, %Error{kind: :eisdir}} = VFS.write_file(fs, "/dir", "no")
           end
         end
-      end
 
-      if :append in @__backend_caps__ do
-        describe "append_file/3" do
-          test "appends to existing file" do
-            fs = fresh()
-            {:ok, fs} = VFS.write_file(fs, "/a", "hello")
-            {:ok, fs} = VFS.append_file(fs, "/a", " world")
-            {:ok, "hello world", _fs} = VFS.read_file(fs, "/a")
-          end
-
-          test "creates if missing" do
-            fs = fresh()
-            {:ok, fs} = VFS.append_file(fs, "/new", "first")
-            {:ok, "first", _fs} = VFS.read_file(fs, "/new")
-          end
-        end
-      end
-
-      if :write in @__backend_caps__ do
         describe "mkdir/3" do
           test "creates an empty directory" do
             fs = fresh()
@@ -217,15 +229,15 @@ defmodule VFS.ConformanceCase do
             assert stat.type == :directory
           end
 
-          test "existing directory returns :eexist" do
+          test "existing directory returns :eexist error" do
             fs = fresh()
             {:ok, fs} = VFS.mkdir(fs, "/d")
-            assert {:error, :eexist} = VFS.mkdir(fs, "/d")
+            assert {:error, %Error{kind: :eexist}} = VFS.mkdir(fs, "/d")
           end
 
-          test "missing parent without :parents returns :enoent" do
+          test "missing parent without :parents returns :enoent error" do
             fs = fresh()
-            assert {:error, :enoent} = VFS.mkdir(fs, "/a/b")
+            assert {:error, %Error{kind: :enoent}} = VFS.mkdir(fs, "/a/b")
           end
 
           test ":parents creates intermediates" do
@@ -241,17 +253,17 @@ defmodule VFS.ConformanceCase do
             fs = fresh()
             {:ok, fs} = VFS.write_file(fs, "/a", "")
             {:ok, fs} = VFS.rm(fs, "/a")
-            assert {:error, :enoent} = VFS.read_file(fs, "/a")
+            assert {:error, %Error{kind: :enoent}} = VFS.read_file(fs, "/a")
           end
 
-          test "non-existent returns :enoent" do
-            assert {:error, :enoent} = VFS.rm(fresh(), "/no")
+          test "non-existent returns :enoent error" do
+            assert {:error, %Error{kind: :enoent}} = VFS.rm(fresh(), "/no")
           end
 
-          test "directory without :recursive returns :eisdir" do
+          test "directory without :recursive returns :eisdir error" do
             fs = fresh()
             {:ok, fs} = VFS.write_file(fs, "/d/x", "")
-            assert {:error, :eisdir} = VFS.rm(fs, "/d")
+            assert {:error, %Error{kind: :eisdir}} = VFS.rm(fs, "/d")
           end
 
           test "directory with :recursive removes contents" do
@@ -259,24 +271,8 @@ defmodule VFS.ConformanceCase do
             {:ok, fs} = VFS.write_file(fs, "/d/x", "")
             {:ok, fs} = VFS.write_file(fs, "/d/sub/y", "")
             {:ok, fs} = VFS.rm(fs, "/d", recursive: true)
-            assert {:error, :enoent} = VFS.read_file(fs, "/d/x")
-            assert {:error, :enoent} = VFS.read_file(fs, "/d/sub/y")
-          end
-        end
-      end
-
-      if :chmod in @__backend_caps__ do
-        describe "chmod/3" do
-          test "sets mode bits on a file" do
-            fs = fresh()
-            {:ok, fs} = VFS.write_file(fs, "/a", "")
-            {:ok, fs} = VFS.chmod(fs, "/a", 0o644)
-            {:ok, stat, _fs} = VFS.stat(fs, "/a")
-            assert stat.mode == 0o644
-          end
-
-          test "non-existent path returns :enoent" do
-            assert {:error, :enoent} = VFS.chmod(fresh(), "/missing", 0o644)
+            assert {:error, %Error{kind: :enoent}} = VFS.read_file(fs, "/d/x")
+            assert {:error, %Error{kind: :enoent}} = VFS.read_file(fs, "/d/sub/y")
           end
         end
       end
@@ -370,7 +366,7 @@ defmodule VFS.ConformanceCase do
                   {VFS.mkdir(fs, "/d"), :mkdir},
                   {VFS.rm(fs, "/x"), :rm}
                 ] do
-              assert match?({:error, r} when r in [:erofs, :enotsup], result)
+              assert match?({:error, %Error{kind: k}} when k in [:erofs, :enotsup], result)
             end
           end
         end

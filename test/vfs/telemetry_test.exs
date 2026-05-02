@@ -17,18 +17,14 @@ defmodule VFS.TelemetryTest do
          [:vfs, :write_file],
          [:vfs, :stream_read],
          [:vfs, :walk],
-         [:vfs, :grep],
-         [:vfs, :glob],
          [:vfs, :materialize],
          [:vfs, :mkdir],
-         [:vfs, :rm],
-         [:vfs, :append_file],
-         [:vfs, :chmod]
+         [:vfs, :rm]
        ])}
   end
 
   test "read_file emits :start then :stop with bytes" do
-    fs = VFS.new(%{"/a" => "hello"})
+    fs = VFS.new(memory: %{"/a" => "hello"})
     {:ok, "hello", _} = VFS.read_file(fs, "/a")
 
     assert_received {:telemetry, [:vfs, :read_file, :start], %{system_time: _},
@@ -40,15 +36,16 @@ defmodule VFS.TelemetryTest do
 
   test "read_file emits :stop with bytes: 0 and :error on failure" do
     fs = VFS.new()
-    {:error, :enoent} = VFS.read_file(fs, "/missing")
+    {:error, %VFS.Error{kind: :enoent}} = VFS.read_file(fs, "/missing")
 
     assert_received {:telemetry, [:vfs, :read_file, :start], _, _}
 
-    assert_received {:telemetry, [:vfs, :read_file, :stop], %{bytes: 0}, %{error: :enoent}}
+    assert_received {:telemetry, [:vfs, :read_file, :stop], %{bytes: 0},
+                     %{error: %VFS.Error{kind: :enoent}}}
   end
 
   test "write_file emits :start with bytes, :stop with duration" do
-    fs = VFS.new(%{})
+    fs = VFS.new(memory: %{})
     {:ok, _} = VFS.write_file(fs, "/a", "abc")
 
     assert_received {:telemetry, [:vfs, :write_file, :start], _, %{path: "/a", bytes: 3}}
@@ -57,31 +54,13 @@ defmodule VFS.TelemetryTest do
   end
 
   test "walk emits terminal :start/:stop with entries count" do
-    fs = VFS.new(%{"/a" => "1", "/b/c" => "2"})
+    fs = VFS.new(memory: %{"/a" => "1", "/b/c" => "2"})
 
     fs |> VFS.walk("/") |> Enum.to_list()
 
     assert_received {:telemetry, [:vfs, :walk, :start], %{system_time: _}, %{root: "/", impl: VFS}}
 
     assert_received {:telemetry, [:vfs, :walk, :stop], %{duration: _, entries: 2}, _}
-  end
-
-  test "grep emits terminal :stop with matches count" do
-    fs = VFS.new(%{"/a" => "todo: x\nokay\nTODO again\n"})
-
-    fs |> VFS.grep("/", ~r/TODO/i) |> Enum.to_list()
-
-    assert_received {:telemetry, [:vfs, :grep, :start], _, _}
-    assert_received {:telemetry, [:vfs, :grep, :stop], %{matches: 2}, _}
-  end
-
-  test "glob emits terminal :stop with matches count" do
-    fs = VFS.new(%{"/a.ex" => "", "/b.exs" => "", "/c.ex" => ""})
-
-    fs |> VFS.glob("/", "*.ex") |> Enum.to_list()
-
-    assert_received {:telemetry, [:vfs, :glob, :start], _, _}
-    assert_received {:telemetry, [:vfs, :glob, :stop], %{matches: 2}, _}
   end
 
   test "materialize emits :start/:stop" do
@@ -93,7 +72,7 @@ defmodule VFS.TelemetryTest do
   end
 
   test "mkdir emits :start/:stop" do
-    fs = VFS.new(%{})
+    fs = VFS.new(memory: %{})
     {:ok, _} = VFS.mkdir(fs, "/d")
 
     assert_received {:telemetry, [:vfs, :mkdir, :start], _, _}
@@ -101,7 +80,7 @@ defmodule VFS.TelemetryTest do
   end
 
   test "rm emits :start/:stop" do
-    fs = VFS.new(%{"/a" => ""})
+    fs = VFS.new(memory: %{"/a" => ""})
     {:ok, _} = VFS.rm(fs, "/a")
 
     assert_received {:telemetry, [:vfs, :rm, :start], _, _}
@@ -113,10 +92,10 @@ defmodule VFS.TelemetryTest do
 
     lf = LazyFake.new(%{"/a" => "x"})
 
-    {:ok, _, lf} = VFS.Mountable.read_file(lf, "/a")
+    {:ok, _, lf} = VFS.Mountable.stream_read(lf, "/a", [])
     assert_received {:telemetry, [:vfs, :cache, :miss], %{}, %{path: "/a"}}
 
-    {:ok, _, _} = VFS.Mountable.read_file(lf, "/a")
+    {:ok, _, _} = VFS.Mountable.stream_read(lf, "/a", [])
     assert_received {:telemetry, [:vfs, :cache, :hit], %{}, %{path: "/a"}}
   end
 end

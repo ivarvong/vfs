@@ -3,8 +3,8 @@ defmodule VFS.Memory do
   In-memory `VFS.Mountable` backend.
 
   Files live in a `tree` map (`%{path => binary}`); explicitly-created
-  empty directories live in a `dirs` `MapSet`; `modes` and `mtimes` track
-  permission bits and timestamps.
+  empty directories live in a `dirs` `MapSet`; `mtimes` tracks
+  modification times.
 
   Directories are recognized in two ways:
 
@@ -18,7 +18,7 @@ defmodule VFS.Memory do
   ## Construction
 
       iex> mem = VFS.Memory.new(%{"/foo/bar" => "hello"})
-      iex> {:ok, "hello", _mem} = VFS.Mountable.read_file(mem, "/foo/bar")
+      iex> {:ok, "hello", _mem} = VFS.read_file(mem, "/foo/bar")
       iex> :ok
       :ok
 
@@ -29,11 +29,10 @@ defmodule VFS.Memory do
   @type t :: %__MODULE__{
           tree: %{VFS.Path.t() => binary},
           dirs: MapSet.t(VFS.Path.t()),
-          modes: %{VFS.Path.t() => non_neg_integer()},
           mtimes: %{VFS.Path.t() => DateTime.t()}
         }
 
-  defstruct tree: %{}, dirs: MapSet.new(), modes: %{}, mtimes: %{}
+  defstruct tree: %{}, dirs: MapSet.new(), mtimes: %{}
 
   @doc """
   Build a fresh in-memory FS, optionally seeded with files.
@@ -67,6 +66,7 @@ end
 defimpl VFS.Mountable, for: VFS.Memory do
   use VFS.Skeleton
 
+  alias VFS.Error
   alias VFS.Memory
   alias VFS.Stat
 
@@ -88,21 +88,14 @@ defimpl VFS.Mountable, for: VFS.Memory do
          %Stat{
            type: :regular,
            size: byte_size(content),
-           mtime: Map.get(mem.mtimes, p, @epoch),
-           mode: Map.get(mem.modes, p)
+           mtime: Map.get(mem.mtimes, p, @epoch)
          }, mem}
 
       directory?(mem, p) ->
-        {:ok,
-         %Stat{
-           type: :directory,
-           size: 0,
-           mtime: Map.get(mem.mtimes, p, @epoch),
-           mode: Map.get(mem.modes, p)
-         }, mem}
+        {:ok, %Stat{type: :directory, size: 0, mtime: Map.get(mem.mtimes, p, @epoch)}, mem}
 
       true ->
-        {:error, :enoent}
+        {:error, Error.new(:enoent, path: p)}
     end
   end
 
@@ -120,10 +113,10 @@ defimpl VFS.Mountable, for: VFS.Memory do
         {:ok, names |> Enum.uniq() |> Enum.sort(), mem}
 
       Map.has_key?(mem.tree, p) ->
-        {:error, :enotdir}
+        {:error, Error.new(:enotdir, path: p)}
 
       true ->
-        {:error, :enoent}
+        {:error, Error.new(:enoent, path: p)}
     end
   end
 
@@ -132,24 +125,18 @@ defimpl VFS.Mountable, for: VFS.Memory do
 
     case Map.fetch(mem.tree, p) do
       {:ok, content} ->
-        chunk_size = Keyword.get(opts, :chunk_size, 64 * 1024)
-        {:ok, chunk_stream(content, chunk_size), mem}
+        with {:ok, sliced} <- apply_byte_range(content, opts),
+             {:ok, sliced} <- apply_line_range(sliced, opts) do
+          chunk_size = Keyword.get(opts, :chunk_size, 64 * 1024)
+          {:ok, chunk_stream(sliced, chunk_size), mem}
+        else
+          {:error, reason} -> {:error, Error.new(reason, path: p)}
+        end
 
       :error ->
-        if directory?(mem, p), do: {:error, :eisdir}, else: {:error, :enoent}
-    end
-  end
-
-  # Eager override — Memory has bytes already; skip the stream-then-concat round trip.
-  def read_file(%Memory{} = mem, path) do
-    p = VFS.Path.normalize(path)
-
-    case Map.fetch(mem.tree, p) do
-      {:ok, content} ->
-        {:ok, content, mem}
-
-      :error ->
-        if directory?(mem, p), do: {:error, :eisdir}, else: {:error, :enoent}
+        if directory?(mem, p),
+          do: {:error, Error.new(:eisdir, path: p)},
+          else: {:error, Error.new(:enoent, path: p)}
     end
   end
 
@@ -157,7 +144,7 @@ defimpl VFS.Mountable, for: VFS.Memory do
     p = VFS.Path.normalize(path)
 
     if directory?(mem, p) do
-      {:error, :eisdir}
+      {:error, Error.new(:eisdir, path: p)}
     else
       now = DateTime.utc_now()
 
@@ -176,16 +163,16 @@ defimpl VFS.Mountable, for: VFS.Memory do
 
     cond do
       Map.has_key?(mem.tree, p) ->
-        {:error, :eexist}
+        {:error, Error.new(:eexist, path: p)}
 
       MapSet.member?(mem.dirs, p) ->
-        {:error, :eexist}
+        {:error, Error.new(:eexist, path: p)}
 
       parents? ->
         {:ok, mkdir_p(mem, p)}
 
       not directory?(mem, VFS.Path.dirname(p)) ->
-        {:error, :enoent}
+        {:error, Error.new(:enoent, path: p)}
 
       true ->
         {:ok, put_dir(mem, p)}
@@ -202,32 +189,23 @@ defimpl VFS.Mountable, for: VFS.Memory do
          %{
            mem
            | tree: Map.delete(mem.tree, p),
-             mtimes: Map.delete(mem.mtimes, p),
-             modes: Map.delete(mem.modes, p)
+             mtimes: Map.delete(mem.mtimes, p)
          }}
 
       directory?(mem, p) and p != "/" ->
-        if recursive?, do: {:ok, rm_recursive(mem, p)}, else: {:error, :eisdir}
+        if recursive?,
+          do: {:ok, rm_recursive(mem, p)},
+          else: {:error, Error.new(:eisdir, path: p)}
 
       p == "/" ->
-        if recursive?, do: {:ok, %Memory{}}, else: {:error, :eisdir}
+        if recursive?, do: {:ok, %Memory{}}, else: {:error, Error.new(:eisdir, path: p)}
 
       true ->
-        {:error, :enoent}
+        {:error, Error.new(:enoent, path: p)}
     end
   end
 
-  def chmod(%Memory{} = mem, path, mode) when is_integer(mode) and mode >= 0 do
-    p = VFS.Path.normalize(path)
-
-    if Map.has_key?(mem.tree, p) or directory?(mem, p) do
-      {:ok, %{mem | modes: Map.put(mem.modes, p, mode)}}
-    else
-      {:error, :enoent}
-    end
-  end
-
-  def capabilities(_), do: MapSet.new([:read, :write, :chmod, :append])
+  def capabilities(_), do: MapSet.new([:read, :write])
 
   # ── helpers ──
 
@@ -279,7 +257,6 @@ defimpl VFS.Mountable, for: VFS.Memory do
       mem
       | tree: drop_prefixed(mem.tree, path, prefix),
         dirs: drop_prefixed_set(mem.dirs, path, prefix),
-        modes: drop_prefixed(mem.modes, path, prefix),
         mtimes: drop_prefixed(mem.mtimes, path, prefix)
     }
   end
@@ -294,6 +271,52 @@ defimpl VFS.Mountable, for: VFS.Memory do
     |> Enum.reject(fn k -> k == exact or String.starts_with?(k, prefix) end)
     |> MapSet.new()
   end
+
+  # ── byte_range / line_range slicing ──
+
+  defp apply_byte_range(content, opts) do
+    case Keyword.fetch(opts, :byte_range) do
+      :error ->
+        {:ok, content}
+
+      {:ok, {start, length}}
+      when is_integer(start) and start >= 0 and is_integer(length) and length >= 0 ->
+        {:ok, slice_bytes(content, start, length)}
+
+      {:ok, _bad} ->
+        {:error, :einval}
+    end
+  end
+
+  defp slice_bytes(content, start, _length) when start >= byte_size(content), do: <<>>
+
+  defp slice_bytes(content, start, length) do
+    available = byte_size(content) - start
+    take = min(length, available)
+    :binary.part(content, start, take)
+  end
+
+  defp apply_line_range(content, opts) do
+    case Keyword.fetch(opts, :line_range) do
+      :error ->
+        {:ok, content}
+
+      {:ok, {first, last}} when is_integer(first) and first >= 1 ->
+        slice_lines(content, first, last)
+
+      {:ok, _bad} ->
+        {:error, :einval}
+    end
+  end
+
+  defp slice_lines(content, first, last) when last == :end or is_integer(last) do
+    lines = String.split(content, "\n")
+    last_idx = if last == :end, do: length(lines), else: last
+    sliced = lines |> Enum.slice((first - 1)..(last_idx - 1)//1) |> Enum.join("\n")
+    {:ok, sliced}
+  end
+
+  defp slice_lines(_content, _first, _last), do: {:error, :einval}
 
   defp chunk_stream(<<>>, _size), do: []
 

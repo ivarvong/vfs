@@ -4,8 +4,8 @@ defprotocol VFS.Mountable do
 
   Implementations are plain structs; the protocol dispatches on the struct
   type. Backend authors typically use `VFS.Skeleton` inside their `defimpl`
-  block to inherit defaults for ops they don't natively support, then
-  override the ones they do.
+  block to inherit defaults for `walk/3` and `materialize/2`, then override
+  whichever they want native impls for.
 
   ## Path contract
 
@@ -27,23 +27,16 @@ defprotocol VFS.Mountable do
 
   ## Errors
 
-  POSIX-style atoms:
+  All errors are `%VFS.Error{}` exceptions. Pattern match on `:kind` for
+  flow control:
 
-    * `:enoent`   — path doesn't exist
-    * `:eexist`   — path already exists (e.g. `mkdir` collision)
-    * `:eisdir`   — expected a file, got a directory
-    * `:enotdir`  — expected a directory, got a file
-    * `:erofs`    — the mount or wrapper is read-only
-    * `:enotsup`  — the backend doesn't support this op
-    * `:eacces`   — permission denied
-    * `:einval`   — bad argument (e.g. malformed path)
-    * `:exdev`    — cross-mount op that can't be atomic
-    * `:eio`      — underlying I/O failure
-    * `:eloop`    — symlink loop
+      case VFS.read_file(fs, path) do
+        {:ok, bin, fs} -> ...
+        {:error, %VFS.Error{kind: :enoent}} -> ...
+        {:error, %VFS.Error{kind: :eisdir}} -> ...
+      end
 
-  `:erofs` vs `:enotsup`: a read-only-wrapping defimpl refuses writes with
-  `:erofs` (the *mount* is read-only); a backend that simply doesn't
-  implement an op (e.g. `chmod` on S3) returns `:enotsup`.
+  See `VFS.Error` for the full set of `:kind` values.
   """
 
   @typedoc "Any struct that implements `VFS.Mountable`."
@@ -52,31 +45,11 @@ defprotocol VFS.Mountable do
   @typedoc "An absolute, normalized path (see `VFS.Path`)."
   @type path :: String.t()
 
-  @typedoc "A POSIX-style error atom."
-  @type reason ::
-          :enoent
-          | :eexist
-          | :eisdir
-          | :enotdir
-          | :erofs
-          | :enotsup
-          | :eacces
-          | :einval
-          | :exdev
-          | :eio
-          | :eloop
-
   @typedoc "Capability flags reported by `capabilities/1`."
   @type capability ::
           :read
           | :write
-          | :symlinks
-          | :hardlinks
-          | :chmod
-          | :append
           | :native_walk
-          | :native_glob
-          | :native_grep
           | :native_stream_read
           | :lazy
 
@@ -87,44 +60,29 @@ defprotocol VFS.Mountable do
   def exists?(impl, path)
 
   @doc "Return metadata for `path`."
-  @spec stat(t, path) :: {:ok, VFS.Stat.t(), t} | {:error, reason}
+  @spec stat(t, path) :: {:ok, VFS.Stat.t(), t} | {:error, VFS.Error.t()}
   def stat(impl, path)
 
-  @doc "Like `stat/2` but does not follow a final symlink."
-  @spec lstat(t, path) :: {:ok, VFS.Stat.t(), t} | {:error, reason}
-  def lstat(impl, path)
-
   @doc "Return entries directly under directory `path`, sorted, names only (no leading slash)."
-  @spec readdir(t, path) :: {:ok, [String.t()], t} | {:error, reason}
+  @spec readdir(t, path) :: {:ok, [String.t()], t} | {:error, VFS.Error.t()}
   def readdir(impl, path)
-
-  @doc "Resolve a symlink one level."
-  @spec readlink(t, path) :: {:ok, path, t} | {:error, reason}
-  def readlink(impl, path)
-
-  # ── streaming reads are the primary read API ──
 
   @doc """
   Open `path` for streaming read. Returns an `t:Enumerable.t/0` that emits
   binary chunks. Options:
 
     * `:chunk_size`  — default `64 * 1024`
-    * `:byte_range`  — `{start, length}` (inclusive of `start`, length bytes)
-    * `:line_range`  — `{first, last}` 1-based, inclusive
+    * `:byte_range`  — `{start, length}` — start is 0-based, returns up to
+      `length` bytes starting at `start`
+    * `:line_range`  — `{first, last}` — 1-based, inclusive line numbers;
+      `last` may be `:end` to read to EOF
 
   The returned impl reflects state needed to *open* the stream; cache state
   populated during enumeration does not escape (see `walk/3` caveat).
   """
-  @spec stream_read(t, path, keyword) :: {:ok, Enumerable.t(), t} | {:error, reason}
+  @spec stream_read(t, path, keyword) ::
+          {:ok, Enumerable.t(binary), t} | {:error, VFS.Error.t()}
   def stream_read(impl, path, opts)
-
-  @doc """
-  Eagerly read `path` into a binary. Default impl (via `VFS.Skeleton`) runs
-  `stream_read/3` into a binary; backends with a naturally-eager path (e.g.
-  `VFS.Memory`) override for a fast path.
-  """
-  @spec read_file(t, path) :: {:ok, binary, t} | {:error, reason}
-  def read_file(impl, path)
 
   # ── streaming tree walk ──
 
@@ -134,13 +92,17 @@ defprotocol VFS.Mountable do
 
     * `:max_depth`        — `:infinity` (default) or non-neg integer
     * `:include_dirs`     — emit directory entries themselves (default `false`)
-    * `:follow_symlinks`  — default `false`
 
   Returns a bare `t:Enumerable.t/0`, not a `{:ok, _, t}` tuple. Cache state
   populated during enumeration does not escape; call `materialize/2` first
   for agent loops that re-touch files after a walk.
+
+  Default-implementation traversal is depth-first. `Stream.take/2` halts the
+  traversal as soon as the consumer has enough — composes lazily over
+  arbitrarily deep (even infinite-depth) trees so long as `readdir/2`
+  returns finite per-directory lists.
   """
-  @spec walk(t, path, keyword) :: Enumerable.t()
+  @spec walk(t, path, keyword) :: Enumerable.t({path, VFS.Stat.t()})
   def walk(impl, root, opts)
 
   # ── eager prefetch lever for lazy backends ──
@@ -150,47 +112,32 @@ defprotocol VFS.Mountable do
   (e.g. partial-clone exgit repos) use this to avoid per-blob round-trips
   during a subsequent bulk traversal.
   """
-  @spec materialize(t, keyword) :: {:ok, t} | {:error, reason}
+  @spec materialize(t, keyword) :: {:ok, t} | {:error, VFS.Error.t()}
   def materialize(impl, opts)
 
   # ── mutations ──
 
   @doc "Write `content` to `path`. Options reserved for future use."
-  @spec write_file(t, path, binary, keyword) :: {:ok, t} | {:error, reason}
+  @spec write_file(t, path, binary, keyword) :: {:ok, t} | {:error, VFS.Error.t()}
   def write_file(impl, path, content, opts)
-
-  @doc "Append `content` to `path`. Creates the file if it doesn't exist."
-  @spec append_file(t, path, binary) :: {:ok, t} | {:error, reason}
-  def append_file(impl, path, content)
 
   @doc """
   Create a directory at `path`. Options:
 
     * `:parents` — create missing intermediate directories (`mkdir -p`)
   """
-  @spec mkdir(t, path, keyword) :: {:ok, t} | {:error, reason}
+  @spec mkdir(t, path, keyword) :: {:ok, t} | {:error, VFS.Error.t()}
   def mkdir(impl, path, opts)
 
   @doc """
   Remove `path`. Options:
 
     * `:recursive` — remove a directory and all contents (default `false`).
-      Without `:recursive`, `rm` on a directory returns `{:error, :eisdir}`.
+      Without `:recursive`, `rm` on a directory returns
+      `{:error, %VFS.Error{kind: :eisdir}}`.
   """
-  @spec rm(t, path, keyword) :: {:ok, t} | {:error, reason}
+  @spec rm(t, path, keyword) :: {:ok, t} | {:error, VFS.Error.t()}
   def rm(impl, path, opts)
-
-  @doc "Set permission bits on `path`."
-  @spec chmod(t, path, non_neg_integer) :: {:ok, t} | {:error, reason}
-  def chmod(impl, path, mode)
-
-  @doc "Create a symlink at `link_path` pointing to `target`."
-  @spec symlink(t, path, path) :: {:ok, t} | {:error, reason}
-  def symlink(impl, target, link_path)
-
-  @doc "Create a hard link at `new` to `existing`."
-  @spec link(t, path, path) :: {:ok, t} | {:error, reason}
-  def link(impl, existing, new)
 
   # ── introspection ──
 

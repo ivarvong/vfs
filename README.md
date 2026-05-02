@@ -5,16 +5,19 @@ backends, state-threading reads, lazy primitives, and a tiny core surface
 designed to be passed back and forth across an agent loop.
 
 ```elixir
-fs = VFS.new(%{"/repo/README.md" => "hello\n", "/tmp/scratch" => ""})
+fs = VFS.new(memory: %{"/repo/README.md" => "hello\n", "/tmp/scratch" => ""})
 
 {:ok, "hello\n", fs} = VFS.read_file(fs, "/repo/README.md")
 {:ok, fs} = VFS.write_file(fs, "/tmp/scratch", "world\n")
 
-# Lazy traversal — memory-bounded over arbitrarily large trees.
+# Lazy traversal — memory-bounded over arbitrarily large (even infinite-depth) trees.
 fs
 |> VFS.walk("/", [])
 |> Stream.filter(fn {_, %VFS.Stat{type: t}} -> t == :regular end)
 |> Enum.count()
+
+# Structured errors:
+{:error, %VFS.Error{kind: :enoent}} = VFS.read_file(fs, "/nope")
 ```
 
 ## Why

@@ -37,9 +37,13 @@ All paths reaching a backend impl are:
 
 Mount-prefix stripping happens in `VFS`'s defimpl **before** the call reaches a backend. A backend impl should never see a path containing its own mountpoint. Path normalization is centralized in `VFS.Path`; do not reinvent it elsewhere.
 
-## Errors are POSIX atoms — never strings
+## Errors are structured `%VFS.Error{}` exceptions
 
-| Atom | When |
+Every fallible protocol op returns `{:ok, ...} | {:error, %VFS.Error{}}`. The struct has four fields: `:kind` (a POSIX-style atom), `:path` (the path that failed, in the user's view), `:mount` (the mountpoint that handled it, attached by the dispatcher), and `:message` (human-readable, defaulted from kind+path).
+
+Pattern-match on `:kind` for control flow. `:kind` is one of:
+
+| Kind | When |
 |---|---|
 | `:enoent` | path doesn't exist |
 | `:eexist` | path already exists (e.g. `mkdir` collision) |
@@ -48,12 +52,12 @@ Mount-prefix stripping happens in `VFS`'s defimpl **before** the call reaches a 
 | `:erofs` | the **mount or wrapper** is read-only |
 | `:enotsup` | the **backend** doesn't implement this op |
 | `:eacces` | permission denied |
-| `:einval` | bad argument (e.g. malformed path) |
-| `:exdev` | cross-mount op that can't be atomic (e.g. `mv` across mounts) |
+| `:einval` | bad argument (e.g. malformed path or option) |
+| `:exdev` | cross-mount op that can't be atomic |
 | `:eio` | underlying I/O failure |
 | `:eloop` | symlink loop |
 
-`:erofs` vs `:enotsup` is a real distinction: a read-only-wrapping defimpl refuses writes with `:erofs`; an S3 backend that simply has no `chmod` returns `:enotsup`. Pyex's old "format Python error string in the FS layer" pattern is wrong — error formatting belongs at the consumer boundary, not in vfs.
+`:erofs` vs `:enotsup` is a real distinction: a read-only-wrapping defimpl refuses writes with `:erofs`; a backend that simply doesn't implement an op returns `:enotsup`. Pyex's old "format Python error string in the FS layer" pattern is wrong — error formatting belongs at the consumer boundary, not in vfs. Errors are also raisable (`raise VFS.Error, kind: ..., path: ...`) for `!`-style helpers.
 
 ## `%VFS.Stat{}`, not `File.Stat`
 
@@ -74,22 +78,28 @@ If you ever materialize a binary to then re-stream it, you're doing it backwards
 
 ## Keep the protocol minimal — the bar for new ops is high
 
+The v0.1 protocol surface is **9 callbacks**: `exists?`, `stat`, `readdir`, `stream_read`, `walk`, `write_file`, `mkdir`, `rm`, `materialize`, `capabilities`.
+
 A new protocol op is justified only when:
 
-1. It cannot be expressed efficiently in terms of `walk + stream_read + stat`, **and**
+1. It cannot be expressed efficiently in terms of the existing callbacks, **and**
 2. Multiple backend types could meaningfully implement it differently (i.e. pushdown matters).
 
-Things that are explicitly **not** protocol ops in v1:
+Things that are explicitly **not** protocol ops:
 
-- `grep`, `glob`, `find` — `VFS` module helpers, composed from primitives.
-- `hash`, `diff` — deferred to optional secondary protocols (`VFS.ContentAddressed`, `VFS.Diffable`) if patterns recur.
-- `%VFS.Match{}` or any op-specific result struct in the core — helpers return plain tuples; consumers wrap if they want named types.
+- `read_file` — derived in `VFS.read_file/2` from `stream_read/3`. Backends that have an eager fast path can return a single-chunk stream from `stream_read`.
+- `grep`, `glob`, `find`, `cp`, `mv` — out of the core. Either consumer code or a future companion package. The library is a filesystem abstraction; search and composition are layers above.
+- `lstat`, `readlink`, `symlink`, `link` — no v1 backend uses these. Add when there's a real consumer.
+- `chmod` — no real consumer yet. Memory tracks modes internally if needed; lift to a separate `VFS.Permissioned` protocol if a future backend cares.
+- `append_file` — composable from `read_file + write_file` at the consumer.
+- `hash`, `diff` — deferred to optional secondary protocols if patterns recur.
+- `%VFS.Match{}` or any op-specific result struct — plain tuples in consumer code; named types are a consumer-side concern.
 
-Backend-specific perf optimizations (e.g. `Exgit.FS.grep/4`'s pack-internal scanner) live in the backend module, **not** the core protocol. The protocol provides correctness and portability; the backend module provides peak perf when a caller can commit to a specific backend. This is the "escape hatch" pattern; it is not a leak.
+Backend-specific perf optimizations (e.g. an exgit pack-internal scanner) live in the backend module, **not** the core protocol. The protocol provides correctness and portability; the backend module provides peak perf when a caller can commit to a specific backend. This is the "escape hatch" pattern; it is not a leak.
 
 ## Capabilities
 
-`capabilities/1` returns `MapSet.t(atom)`. Documented atoms: `:read`, `:write`, `:symlinks`, `:hardlinks`, `:chmod`, `:append`, `:native_walk`, `:native_glob`, `:native_grep`, `:native_stream_read`, `:lazy`. Don't introduce new ones without a concrete consumer that needs to branch on them.
+`capabilities/1` returns `MapSet.t(atom)`. Documented atoms: `:read`, `:write`, `:native_walk`, `:native_stream_read`, `:lazy`. Don't introduce new ones without a concrete consumer that needs to branch on them.
 
 ## Observability — `:telemetry` events, OTel-ready
 
@@ -102,10 +112,13 @@ VFS is a hot-path dep in agent loops. Observability is non-optional. Every publi
 | `[:vfs, :read_file, _]` | `%{path, impl}` | `%{duration, bytes}` |
 | `[:vfs, :stream_read, _]` | `%{path, impl, opts}` | `%{duration}` (open only; per-chunk not emitted) |
 | `[:vfs, :write_file, _]` | `%{path, impl, bytes}` | `%{duration}` |
+| `[:vfs, :mkdir, _]` | `%{path, impl, opts}` | `%{duration}` |
+| `[:vfs, :rm, _]` | `%{path, impl, opts}` | `%{duration}` |
 | `[:vfs, :walk, _]` | `%{root, impl, opts}` | `%{duration, entries}` (terminal — emitted on enumeration end) |
-| `[:vfs, :grep, _]` / `[:vfs, :glob, _]` | `%{root, impl, pattern}` | `%{duration, matches}` |
 | `[:vfs, :materialize, _]` | `%{impl}` | `%{duration}` |
 | `[:vfs, :cache, :hit]` / `[:vfs, :cache, :miss]` | `%{path, impl}` | `%{}` |
+
+On error the `:stop` event metadata also includes `%{error: %VFS.Error{...}}`.
 
 Rules:
 
@@ -117,7 +130,7 @@ Rules:
 
 ## Dependencies
 
-- **Runtime deps:** `:telemetry` only. It is universally treated as effectively-stdlib in the Elixir ecosystem (Phoenix, Ecto, Broadway, Oban all depend on it) and is the seam that makes OTel integration work. No other runtime deps without explicit discussion.
+- **Runtime deps:** `:telemetry` only. It is universally treated as effectively-stdlib in the Elixir ecosystem (Phoenix, Ecto, Broadway, Oban all depend on it) and is the seam that makes OTel integration work. **No other runtime deps without explicit discussion.** This is load-bearing: vfs is a *pure library* — no `Application`, no `start_link`, no global ETS, no init-on-load. The user-visible state is exactly what they hold in their hand. That property is *why* this can be passed across an agent loop, run inside a release, on Nerves, or in a test sandbox without ceremony.
 - **Dev/test deps:** `:stream_data`, `:dialyxir`, `:credo`, `:excoveralls`, `:ex_doc`, `:benchee` (optional perf tracking).
 - Backend libraries (`:exgit`, future S3 impl, etc.) take `:vfs` as an **optional** dep — never the reverse. Dependency direction is backend → vfs. Per Dave: vfs is the abstraction, exgit is the concrete thing.
 

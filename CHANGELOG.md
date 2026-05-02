@@ -12,10 +12,14 @@ will always be flagged here.
 
 ### Added
 - `VFS.Mountable` protocol — pluggable virtual filesystem with state-threading reads.
-- `VFS.Stat`, `VFS.Path` foundation modules.
-- `VFS.Memory` in-memory backend.
+- `VFS.Stat`, `VFS.Path`, `VFS.Error` foundation modules. Errors are
+  structured `%VFS.Error{kind, path, mount, message}` exceptions; pattern
+  match on `:kind` for control flow.
+- `VFS.Memory` in-memory backend (read+write).
 - `%VFS{}` mount table with longest-prefix routing; itself a `VFS.Mountable`.
 - `VFS.Skeleton` macro for backend authors; `VFS.Default` fallback walk impl.
-- `VFS.grep/4`, `VFS.glob/3` helpers composed from `walk` + `stream_read`.
+- `VFS.read_file/2` derived from `VFS.Mountable.stream_read/3`; honors
+  `:chunk_size`, `:byte_range`, and `:line_range` options.
 - Telemetry events under the `[:vfs, _, _]` prefix for every public op.
-- Conformance test harness parametrized over backend impls.
+- `VFS.assert_implemented!/1` for validating values at trust boundaries.
+- Conformance test harness (`VFS.ConformanceCase`) parametrized over backend impls.

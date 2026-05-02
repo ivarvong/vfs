@@ -25,6 +25,7 @@ end
 defimpl VFS.Mountable, for: VFS.Test.LazyFake do
   use VFS.Skeleton
 
+  alias VFS.Error
   alias VFS.Stat
   alias VFS.Test.LazyFake
 
@@ -47,26 +48,31 @@ defimpl VFS.Mountable, for: VFS.Test.LazyFake do
         {:ok, %Stat{type: :directory, size: 0, mtime: @epoch}, lf}
 
       true ->
-        {:error, :enoent}
+        {:error, Error.new(:enoent, path: p)}
     end
   end
 
   def readdir(%LazyFake{source: source} = lf, path) do
     p = VFS.Path.normalize(path)
 
-    if p == "/" or has_descendants?(source, p) do
-      prefix = if p == "/", do: "/", else: p <> "/"
+    cond do
+      p == "/" or has_descendants?(source, p) ->
+        prefix = if p == "/", do: "/", else: p <> "/"
 
-      names =
-        source
-        |> Map.keys()
-        |> children_under(prefix)
-        |> Enum.uniq()
-        |> Enum.sort()
+        names =
+          source
+          |> Map.keys()
+          |> children_under(prefix)
+          |> Enum.uniq()
+          |> Enum.sort()
 
-      {:ok, names, lf}
-    else
-      if Map.has_key?(source, p), do: {:error, :enotdir}, else: {:error, :enoent}
+        {:ok, names, lf}
+
+      Map.has_key?(source, p) ->
+        {:error, Error.new(:enotdir, path: p)}
+
+      true ->
+        {:error, Error.new(:enoent, path: p)}
     end
   end
 
@@ -84,22 +90,15 @@ defimpl VFS.Mountable, for: VFS.Test.LazyFake do
         end
 
       :error ->
-        if has_descendants?(source, p), do: {:error, :eisdir}, else: {:error, :enoent}
+        if has_descendants?(source, p),
+          do: {:error, Error.new(:eisdir, path: p)},
+          else: {:error, Error.new(:enoent, path: p)}
     end
   end
 
-  # Eager fast-path also goes through the cache-counting path.
-  def read_file(%LazyFake{} = lf, path) do
-    case stream_read(lf, path, []) do
-      {:ok, [content], lf2} -> {:ok, content, lf2}
-      {:error, _} = err -> err
-    end
-  end
-
-  def write_file(_, _, _, _), do: {:error, :erofs}
-  def append_file(_, _, _), do: {:error, :erofs}
-  def mkdir(_, _, _), do: {:error, :erofs}
-  def rm(_, _, _), do: {:error, :erofs}
+  def write_file(_, path, _, _), do: {:error, Error.new(:erofs, path: path)}
+  def mkdir(_, path, _), do: {:error, Error.new(:erofs, path: path)}
+  def rm(_, path, _), do: {:error, Error.new(:erofs, path: path)}
 
   def materialize(%LazyFake{source: source} = lf, _opts) do
     {:ok, %{lf | cache: source}}

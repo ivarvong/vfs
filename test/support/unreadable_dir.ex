@@ -2,7 +2,8 @@ defmodule VFS.Test.UnreadableDir do
   @moduledoc false
   # Test backend with one directory `/borked` that reports as a directory
   # in `stat/2` but errors `:eacces` from `readdir/2`. Used to verify that
-  # `VFS.Default.walk/3` silently skips subtrees whose readdir fails.
+  # `VFS.Default.walk/3` silently skips subtrees whose readdir fails, plus
+  # error pass-through from leaf backends to the mount-table dispatcher.
 
   @type t :: %__MODULE__{}
   defstruct []
@@ -14,6 +15,7 @@ end
 defimpl VFS.Mountable, for: VFS.Test.UnreadableDir do
   use VFS.Skeleton
 
+  alias VFS.Error
   alias VFS.Stat
 
   @epoch DateTime.from_unix!(0)
@@ -29,20 +31,18 @@ defimpl VFS.Mountable, for: VFS.Test.UnreadableDir do
   def stat(%VFS.Test.UnreadableDir{} = b, "/ok"),
     do: {:ok, %Stat{type: :regular, size: 0, mtime: @epoch}, b}
 
-  def stat(_b, "/locked"), do: {:error, :eacces}
+  def stat(_b, "/locked"), do: {:error, Error.new(:eacces, path: "/locked")}
 
-  def stat(_b, _), do: {:error, :enoent}
+  def stat(_b, path), do: {:error, Error.new(:enoent, path: path)}
 
   def readdir(%VFS.Test.UnreadableDir{} = b, "/"), do: {:ok, ["borked", "ok"], b}
-  def readdir(_b, "/borked"), do: {:error, :eacces}
-  def readdir(_b, _), do: {:error, :enoent}
+  def readdir(_b, "/borked"), do: {:error, Error.new(:eacces, path: "/borked")}
+  def readdir(_b, path), do: {:error, Error.new(:enoent, path: path)}
 
-  def stream_read(_b, _, _), do: {:error, :enotsup}
-  def read_file(_, _), do: {:error, :enotsup}
-  def append_file(_, _, _), do: {:error, :erofs}
-  def write_file(_, _, _, _), do: {:error, :erofs}
-  def mkdir(_, _, _), do: {:error, :erofs}
-  def rm(_, _, _), do: {:error, :erofs}
+  def stream_read(_b, path, _), do: {:error, Error.new(:enotsup, path: path)}
+  def write_file(_, path, _, _), do: {:error, Error.new(:erofs, path: path)}
+  def mkdir(_, path, _), do: {:error, Error.new(:erofs, path: path)}
+  def rm(_, path, _), do: {:error, Error.new(:erofs, path: path)}
 
   def capabilities(_), do: MapSet.new([:read])
 end
