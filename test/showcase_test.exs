@@ -63,7 +63,7 @@ defmodule VFS.ShowcaseTest do
   #   - Per-request scratch isolated from sibling agent invocations
   describe "1. solo agent: in-memory scratch only" do
     test "intermediate state written by step 1 is read by step 2" do
-      fs = VFS.new(memory: %{})
+      fs = VFS.new() |> VFS.mount("/", VFS.Memory.new(%{}))
 
       # Step 1: agent runs a "tool" that produces a CSV.
       csv = "id,score\n1,0.91\n2,0.87\n3,0.42\n"

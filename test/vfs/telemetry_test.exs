@@ -24,7 +24,7 @@ defmodule VFS.TelemetryTest do
   end
 
   test "read_file emits :start then :stop with bytes" do
-    fs = VFS.new(memory: %{"/a" => "hello"})
+    fs = VFS.new() |> VFS.mount("/", VFS.Memory.new(%{"/a" => "hello"}))
     {:ok, "hello", _} = VFS.read_file(fs, "/a")
 
     assert_received {:telemetry, [:vfs, :read_file, :start], %{system_time: _},
@@ -45,7 +45,7 @@ defmodule VFS.TelemetryTest do
   end
 
   test "write_file emits :start with bytes, :stop with duration" do
-    fs = VFS.new(memory: %{})
+    fs = VFS.new() |> VFS.mount("/", VFS.Memory.new(%{}))
     {:ok, _} = VFS.write_file(fs, "/a", "abc")
 
     assert_received {:telemetry, [:vfs, :write_file, :start], _, %{path: "/a", bytes: 3}}
@@ -54,7 +54,7 @@ defmodule VFS.TelemetryTest do
   end
 
   test "walk emits terminal :start/:stop with entries count" do
-    fs = VFS.new(memory: %{"/a" => "1", "/b/c" => "2"})
+    fs = VFS.new() |> VFS.mount("/", VFS.Memory.new(%{"/a" => "1", "/b/c" => "2"}))
 
     fs |> VFS.walk("/") |> Enum.to_list()
 
@@ -72,7 +72,7 @@ defmodule VFS.TelemetryTest do
   end
 
   test "mkdir emits :start/:stop" do
-    fs = VFS.new(memory: %{})
+    fs = VFS.new() |> VFS.mount("/", VFS.Memory.new(%{}))
     {:ok, _} = VFS.mkdir(fs, "/d")
 
     assert_received {:telemetry, [:vfs, :mkdir, :start], _, _}
@@ -80,7 +80,7 @@ defmodule VFS.TelemetryTest do
   end
 
   test "rm emits :start/:stop" do
-    fs = VFS.new(memory: %{"/a" => ""})
+    fs = VFS.new() |> VFS.mount("/", VFS.Memory.new(%{"/a" => ""}))
     {:ok, _} = VFS.rm(fs, "/a")
 
     assert_received {:telemetry, [:vfs, :rm, :start], _, _}

@@ -5,7 +5,9 @@ backends, state-threading reads, lazy primitives, and a tiny core surface
 designed to be passed back and forth across an agent loop.
 
 ```elixir
-fs = VFS.new(memory: %{"/repo/README.md" => "hello\n", "/tmp/scratch" => ""})
+fs =
+  VFS.new()
+  |> VFS.mount("/", VFS.Memory.new(%{"/repo/README.md" => "hello\n", "/tmp/scratch" => ""}))
 
 {:ok, "hello\n", fs} = VFS.read_file(fs, "/repo/README.md")
 {:ok, fs} = VFS.write_file(fs, "/tmp/scratch", "world\n")

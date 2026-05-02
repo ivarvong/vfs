@@ -9,29 +9,14 @@ defmodule VFSTest do
 
   doctest VFS
 
-  describe "new/1" do
-    test "with no args returns an empty mount table" do
+  describe "new/0" do
+    test "returns an empty mount table" do
       assert %VFS{mounts: []} = VFS.new()
     end
 
-    test "with memory: opt seeds an in-memory root mount" do
-      fs = VFS.new(memory: %{"/foo" => "bar"})
+    test "the canonical pattern is `VFS.new() |> VFS.mount(...)`" do
+      fs = VFS.new() |> VFS.mount("/", VFS.Memory.new(%{"/foo" => "bar"}))
       assert {:ok, "bar", _fs} = VFS.read_file(fs, "/foo")
-    end
-
-    test "with root: backend mounts the backend at /" do
-      mem = VFS.Memory.new(%{"/x" => "y"})
-      fs = VFS.new(root: mem)
-      assert {:ok, "y", _fs} = VFS.read_file(fs, "/x")
-    end
-
-    test "rejects unknown options" do
-      assert_raise ArgumentError, ~r/exactly one of/, fn -> VFS.new(bogus: 1) end
-    end
-
-    test "rejects multiple options at once" do
-      mem = VFS.Memory.new()
-      assert_raise ArgumentError, ~r/exactly one of/, fn -> VFS.new(memory: %{}, root: mem) end
     end
   end
 
@@ -72,12 +57,12 @@ defmodule VFSTest do
 
   describe "umount/2" do
     test "removes the named mount" do
-      fs = VFS.new(memory: %{"/x" => "y"}) |> VFS.umount("/")
+      fs = VFS.new() |> VFS.mount("/", VFS.Memory.new(%{"/x" => "y"})) |> VFS.umount("/")
       assert %VFS{mounts: []} = fs
     end
 
     test "no-op for unknown mount" do
-      fs = VFS.new(memory: %{"/x" => "y"})
+      fs = VFS.new() |> VFS.mount("/", VFS.Memory.new(%{"/x" => "y"}))
       assert VFS.mounts(fs) == VFS.mounts(VFS.umount(fs, "/nope"))
     end
   end
@@ -155,7 +140,10 @@ defmodule VFSTest do
     end
 
     test "walking under a sub-path of a mount descends into that backend" do
-      fs = VFS.new(memory: %{"/sub/a" => "1", "/sub/b" => "2", "/elsewhere" => "x"})
+      fs =
+        VFS.new()
+        |> VFS.mount("/", VFS.Memory.new(%{"/sub/a" => "1", "/sub/b" => "2", "/elsewhere" => "x"}))
+
       paths = fs |> VFS.walk("/sub") |> Enum.map(&elem(&1, 0)) |> Enum.sort()
       assert paths == ["/sub/a", "/sub/b"]
     end

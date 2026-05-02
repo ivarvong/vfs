@@ -14,7 +14,7 @@ defmodule VFS do
 
   ## Quick tour
 
-      iex> fs = VFS.new(memory: %{"/repo/README.md" => "hello\\n", "/tmp/scratch" => ""})
+      iex> fs = VFS.new() |> VFS.mount("/", VFS.Memory.new(%{"/repo/README.md" => "hello\\n", "/tmp/scratch" => ""}))
       iex> {:ok, "hello\\n", fs} = VFS.read_file(fs, "/repo/README.md")
       iex> {:ok, fs} = VFS.write_file(fs, "/tmp/scratch", "world\\n")
       iex> {:ok, "world\\n", _fs} = VFS.read_file(fs, "/tmp/scratch")
@@ -63,41 +63,14 @@ defmodule VFS do
   ## Examples
 
       iex> %VFS{mounts: []} = VFS.new()
-  """
-  @spec new() :: t()
-  def new, do: %__MODULE__{}
 
-  @doc """
-  Build a `%VFS{}` from one of:
-
-    * `memory: %{"/path" => content, ...}` — root in-memory mount, seeded.
-    * `root: backend` — any `VFS.Mountable` mounted at `/`.
-
-  ## Examples
-
-      iex> fs = VFS.new(memory: %{"/foo" => "bar"})
+      iex> fs = VFS.new() |> VFS.mount("/", VFS.Memory.new(%{"/foo" => "bar"}))
       iex> {:ok, "bar", _fs} = VFS.read_file(fs, "/foo")
       iex> :ok
       :ok
-
-      iex> mem = VFS.Memory.new()
-      iex> %VFS{mounts: [{"/", _}]} = VFS.new(root: mem)
   """
-  @spec new(memory: %{optional(String.t()) => binary}) :: t()
-  @spec new(root: Mountable.t()) :: t()
-  def new(opts) when is_list(opts) do
-    case Keyword.split(opts, [:memory, :root]) do
-      {[memory: files], []} when is_map(files) ->
-        mount(%__MODULE__{}, "/", VFS.Memory.new(files))
-
-      {[root: backend], []} when is_struct(backend) ->
-        mount(%__MODULE__{}, "/", backend)
-
-      _ ->
-        raise ArgumentError,
-              "VFS.new/1 expects exactly one of [memory: %{...}] or [root: backend], got: #{inspect(opts)}"
-    end
-  end
+  @spec new() :: t()
+  def new, do: %__MODULE__{}
 
   @doc """
   Mount `backend` at `mountpoint`. If a mount already exists at the same
@@ -124,7 +97,7 @@ defmodule VFS do
 
   ## Examples
 
-      iex> fs = VFS.new(memory: %{"/a" => "b"}) |> VFS.umount("/")
+      iex> fs = VFS.new() |> VFS.mount("/", VFS.Memory.new(%{"/a" => "b"})) |> VFS.umount("/")
       iex> %VFS{mounts: []} = fs
   """
   @spec umount(t(), String.t()) :: t()
@@ -248,7 +221,7 @@ defmodule VFS do
 
   ## Examples
 
-      iex> fs = VFS.new(memory: %{"/a" => "1", "/b/c" => "2"})
+      iex> fs = VFS.new() |> VFS.mount("/", VFS.Memory.new(%{"/a" => "1", "/b/c" => "2"}))
       iex> fs |> VFS.walk("/", []) |> Enum.map(&elem(&1, 0)) |> Enum.sort()
       ["/a", "/b/c"]
   """
