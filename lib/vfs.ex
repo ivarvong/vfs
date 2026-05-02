@@ -453,7 +453,7 @@ defimpl VFS.Mountable, for: VFS do
       {:ok, mp, sub, backend} ->
         case VFS.Mountable.readdir(backend, sub) do
           {:ok, names, new_backend} ->
-            {:ok, merge_sorted(names, synthetic), VFS.__put_mount__(vfs, mp, new_backend)}
+            {:ok, merge_entries(names, synthetic), VFS.__put_mount__(vfs, mp, new_backend)}
 
           {:error, %Error{kind: :enoent}} when synthetic != [] ->
             {:ok, Enum.sort(synthetic), vfs}
@@ -526,8 +526,16 @@ defimpl VFS.Mountable, for: VFS do
     %Stat{type: :directory, size: 0, mtime: @epoch}
   end
 
-  defp merge_sorted(real, synthetic) do
+  # When the backend's listing is a bounded list, merge with synthetic
+  # children, dedup, and sort — matches the bounded-readdir convention.
+  # When it's a Stream (paginated, unbounded), prepend synthetic children
+  # then concat the stream — preserves laziness so consumers can `Stream.take`.
+  defp merge_entries(real, synthetic) when is_list(real) do
     (real ++ synthetic) |> Enum.uniq() |> Enum.sort()
+  end
+
+  defp merge_entries(real, synthetic) do
+    Stream.concat(Enum.sort(synthetic), real)
   end
 
   defp walk_and_prefix(backend, sub, mp, opts) do

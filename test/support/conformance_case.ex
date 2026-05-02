@@ -83,7 +83,9 @@ defmodule VFS.ConformanceCase do
             {:ok, fs} = VFS.write_file(fs, "/a", "2")
             {:ok, fs} = VFS.write_file(fs, "/c", "3")
             {:ok, names, _fs} = VFS.readdir(fs, "/")
-            assert names == ["a", "b", "c"]
+            # readdir returns Enumerable (a list for bounded backends, a Stream
+            # for paginated/unbounded ones). Treat it as Enumerable in tests.
+            assert Enum.to_list(names) == ["a", "b", "c"]
           end
         end
 
@@ -93,7 +95,7 @@ defmodule VFS.ConformanceCase do
             {:ok, fs} = VFS.write_file(fs, "/dir/a", "1")
             {:ok, fs} = VFS.write_file(fs, "/dir/sub/b", "2")
             {:ok, names, _fs} = VFS.readdir(fs, "/dir")
-            assert names == ["a", "sub"]
+            assert Enum.to_list(names) == ["a", "sub"]
           end
         end
 

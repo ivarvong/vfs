@@ -70,6 +70,14 @@ Exactly four fields:
 
 Don't grow this struct. Backend-specific metadata (blob SHA, S3 ETag, etc.) is exposed via backend-module getters, never through the universal stat shape.
 
+## `readdir/2` returns `Enumerable.t(String.t())`, not necessarily a list
+
+Bounded backends (Memory, future SQLite-backed, etc.) should return a list of names — the simplest Enumerable, supports `length/1` and `Enum.sort/1` natively. Unbounded or paginated backends (S3 with millions of keys, a virtual `/integers/N` namespace, a database cursor) should return a `Stream`. Consumers must treat the result as Enumerable: use `Enum.to_list/1` only when you know it's bounded; use `Stream.take/2` when you don't.
+
+The mount-table dispatcher detects list-vs-stream and merges synthetic mountpoint children appropriately — sorted+deduped for bounded, concat-with-synthetic-prepended for unbounded.
+
+This is the design that lets vfs front a real S3 or git backend with realistically-sized listings without exploding memory. See `test/support/lazy_dir.ex` for a worked example.
+
 ## Read API: `stream_read/3` is primary, `read_file/2` is derived
 
 The `VFS.Skeleton` macro supplies a default `read_file/2` that runs `stream_read` into a binary via `IO.iodata_to_binary`. New backends implement `stream_read/3` and let the skeleton derive the rest. Override `read_file/2` only when there's a measurably faster eager path (e.g. `VFS.Memory`, where the bytes are already in hand).

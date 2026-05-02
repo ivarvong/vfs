@@ -63,8 +63,23 @@ defprotocol VFS.Mountable do
   @spec stat(t, path) :: {:ok, VFS.Stat.t(), t} | {:error, VFS.Error.t()}
   def stat(impl, path)
 
-  @doc "Return entries directly under directory `path`, sorted, names only (no leading slash)."
-  @spec readdir(t, path) :: {:ok, [String.t()], t} | {:error, VFS.Error.t()}
+  @doc """
+  Return entries directly under directory `path` — names only, no leading
+  slash, no path separators within names.
+
+  Returns an `t:Enumerable.t/0` of strings. Backends with bounded
+  directories should return a list (the simplest Enumerable; `length/1`
+  and `Enum.sort/1` work natively on it). Backends with paginated or
+  unbounded listings (S3 with many keys, a database-backed store, a
+  virtual `/integers/N` namespace) should return a `Stream`. Consumers
+  should treat the result as an Enumerable: use `Enum.to_list/1` or
+  `Stream.take/2` as appropriate; do not assume `length/1` works.
+
+  Order: bounded backends should return entries in lexicographic order
+  by convention (matches POSIX, S3 ListObjects). Unbounded backends
+  document their order in the impl's moduledoc.
+  """
+  @spec readdir(t, path) :: {:ok, Enumerable.t(String.t()), t} | {:error, VFS.Error.t()}
   def readdir(impl, path)
 
   @doc """
