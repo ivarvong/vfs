@@ -65,7 +65,14 @@ defmodule VFS.MixProject do
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:excoveralls, "~> 0.18", only: :test},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
-      {:benchee, "~> 1.3", only: [:dev, :test], runtime: false}
+      {:benchee, "~> 1.3", only: [:dev, :test], runtime: false},
+
+      # Test-only: real exgit for the integration test set. Validates that
+      # VFS.Mountable actually fits a non-trivial real-world backend (lazy
+      # partial-clone, content-addressed objects, network transports). The
+      # defimpl ships in test/support/ for now; production version moves
+      # into :exgit once the protocol shape is stable.
+      {:exgit, github: "ivarvong/exgit", only: :test}
     ]
   end
 
