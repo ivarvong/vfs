@@ -72,7 +72,7 @@ defmodule VFS.MixProject do
       # partial-clone, content-addressed objects, network transports). The
       # defimpl ships in test/support/ for now; production version moves
       # into :exgit once the protocol shape is stable.
-      {:exgit, github: "ivarvong/exgit", only: :test}
+      {:exgit, github: "ivarvong/exgit", branch: "main", only: [:dev, :test]}
     ]
   end
 
