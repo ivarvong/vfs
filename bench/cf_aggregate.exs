@@ -69,7 +69,7 @@ defmodule CFAggregate do
 
   defp get_value(row, :total, key), do: Map.fetch!(row, key) |> as_float()
 
-  defp get_value(row, op, key) do
+  defp get_value(row, _op, key) do
     row |> Map.fetch!("ops") |> Map.fetch!(key) |> as_float()
   end
 
