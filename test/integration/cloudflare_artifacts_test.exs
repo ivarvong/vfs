@@ -5,26 +5,33 @@ defmodule VFS.Integration.CloudflareArtifactsTest do
   This is the **rehydration story** — the durable backing for an agent
   loop:
 
-    1. *boot* — push initial state to a fresh branch on a CF artifacts
-       repo.
-    2. *agent session 1* — clone the branch, mount it via
+    1. *artifact provisioning* — call the CF Artifacts management API to
+       create a fresh repo and mint a write-scoped bearer token.
+    2. *boot* — push initial state to a `main` branch on the new repo.
+    3. *agent session 1* — clone the repo, mount it via
        `Exgit.Workspace` into a `%VFS{}` next to a `VFS.Memory` scratch.
        Read and write files through the unified `VFS` surface, commit,
        push back to CF, then drop **all** in-memory state.
-    3. *rehydrate* — fresh clone of the same branch in a brand-new repo
-       value with no shared object cache or process state. Mount it,
+    4. *rehydrate* — fresh clone of the same repo into a brand-new
+       repo value with no shared object cache or process state. Mount,
        read through VFS, and verify session 1's writes persisted.
+    5. *cleanup* — delete the test repo via the management API.
 
   If session 2 sees session 1's edits, the artifact-backed agent loop
-  works: durable state lives on Cloudflare; the agent process is
+  works: durable state lives on Cloudflare, the agent process is
   fungible.
 
+  Each network operation is timed and printed (`mix test --include
+  integration_network test/integration/cloudflare_artifacts_test.exs`
+  to see the numbers).
+
   Tagged `:integration_network` and `:cloudflare`. Self-skips when the
-  CF env vars are missing. Cleans up its branch on teardown so repeated
-  runs don't pollute `ci.git`.
+  CF management env vars (`CF_API_TOKEN`, `CF_ACCOUNT_ID`) are missing.
   """
   use ExUnit.Case, async: false
 
+  alias Exgit.CloudflareArtifacts
+  alias Exgit.CloudflareArtifacts.{Repo, Token}
   alias Exgit.Object.{Blob, Commit, Tree}
   alias Exgit.{ObjectStore, RefStore, Repository, Transport, Workspace}
 
@@ -32,51 +39,87 @@ defmodule VFS.Integration.CloudflareArtifactsTest do
   @moduletag :cloudflare
   @moduletag timeout: 120_000
 
-  setup_all do
-    url = System.get_env("CF_ARTIFACT_REMOTE")
-    tok = System.get_env("CF_ARTIFACT_TOKEN")
+  @namespace "default"
 
-    if is_nil(url) or url == "" or is_nil(tok) or tok == "" do
+  setup_all do
+    api_token = System.get_env("CF_API_TOKEN")
+    account_id = System.get_env("CF_ACCOUNT_ID")
+
+    if blank?(api_token) or blank?(account_id) do
       {:ok, skip: true}
     else
-      branch = "vfs-rehydrate-#{System.system_time(:millisecond)}-#{rand_suffix()}"
-      ref = "refs/heads/" <> branch
-      remote_ref = "refs/remotes/origin/" <> branch
+      client =
+        CloudflareArtifacts.new(
+          account_id: account_id,
+          namespace: @namespace,
+          api_token: api_token
+        )
+
+      repo_name = "vfs-rehydrate-#{System.system_time(:millisecond)}-#{rand_suffix()}"
 
       on_exit(fn ->
-        repo = empty_repo()
-        _ = Exgit.push(repo, transport(url, tok), refspecs: [{:delete, ref}])
+        _ = CloudflareArtifacts.delete_repo(client, repo_name)
       end)
 
-      {:ok, url: url, tok: tok, branch: branch, ref: ref, remote_ref: remote_ref}
+      {:ok, skip: false, client: client, repo_name: repo_name}
     end
   end
 
-  test "boot → commit → pause → rehydrate persists state through CF artifacts", ctx do
+  test "full lifecycle: provision artifact → boot → commit → pause → rehydrate", ctx do
     if Map.get(ctx, :skip) do
-      assert true, "skipped: CF_ARTIFACT_REMOTE / CF_ARTIFACT_TOKEN not set"
+      assert true, "skipped: CF_API_TOKEN / CF_ACCOUNT_ID not set"
     else
       run_demo(ctx)
     end
   end
 
-  defp run_demo(%{url: url, tok: tok, ref: ref, remote_ref: remote_ref}) do
+  defp run_demo(ctx) do
+    %{client: client, repo_name: repo_name} = ctx
+
+    timings = %{}
+
+    # ── Phase 0: provision artifact via management API ──────────────
+    {timings, %Repo{remote: git_url}} =
+      timed(timings, :create_repo, fn ->
+        {:ok, repo} =
+          CloudflareArtifacts.create_repo(client,
+            name: repo_name,
+            default_branch: "main",
+            description: "vfs rehydration smoketest"
+          )
+
+        repo
+      end)
+
+    {timings, %Token{plaintext: write_token}} =
+      timed(timings, :mint_token, fn ->
+        {:ok, tok} =
+          CloudflareArtifacts.create_token(client, repo: repo_name, scope: :write, ttl: 600)
+
+        tok
+      end)
+
+    transport = transport(git_url, write_token)
+    ref = "refs/heads/main"
+    remote_ref = "refs/remotes/origin/main"
+
     # ── Phase 1: seed initial state on CF ───────────────────────────
     {seed_repo, seed_sha} = build_seed_commit()
     {:ok, seed_repo} = put_ref(seed_repo, ref, seed_sha)
-    {:ok, _} = Exgit.push(seed_repo, transport(url, tok), refspecs: [ref])
+
+    {timings, _} =
+      timed(timings, :push_seed, fn ->
+        {:ok, _} = Exgit.push(seed_repo, transport, refspecs: [ref])
+      end)
 
     # ── Phase 2: "agent boots" — fresh clone, mount via VFS ─────────
-    # CF artifacts advertises `shallow` but not `filter`, so a partial
-    # clone is rejected upstream. Eager clone is fine for the agent
-    # loop demo — pack is tiny.
-    {:ok, agent1_repo} = Exgit.clone(transport(url, tok))
-    assert agent1_repo.mode == :eager
+    {timings, agent1_repo} =
+      timed(timings, :clone_boot, fn ->
+        {:ok, repo} = Exgit.clone(transport)
+        assert repo.mode == :eager
+        repo
+      end)
 
-    # Open the workspace on the remote-tracking ref. Exgit.clone rewrites
-    # `refs/heads/X` → `refs/remotes/origin/X` for every fetched branch
-    # except the server's default HEAD, so this is the canonical local
-    # name for "agent 1 just cloned this branch."
     fs1 =
       VFS.new()
       |> VFS.mount("/repo", Workspace.open(agent1_repo, remote_ref))
@@ -90,24 +133,18 @@ defmodule VFS.Integration.CloudflareArtifactsTest do
     {:ok, fs1} = VFS.write_file(fs1, "/scratch/plan.md", "modify README, add notes\n")
     {:ok, "modify README, add notes\n", fs1} = VFS.read_file(fs1, "/scratch/plan.md")
 
-    # ── Phase 2b: agent mutates the working tree through VFS ────────
+    # Agent mutates the working tree through VFS.
     new_readme = "# seed\n\n# touched by agent 1\n"
     notes = "agent 1 was here\n"
-
     {:ok, fs1} = VFS.write_file(fs1, "/repo/README.md", new_readme)
     {:ok, fs1} = VFS.write_file(fs1, "/repo/notes.md", notes)
-
-    # State threaded back: subsequent reads see the new content.
     {:ok, ^new_readme, fs1} = VFS.read_file(fs1, "/repo/README.md")
     {:ok, ^notes, fs1} = VFS.read_file(fs1, "/repo/notes.md")
 
-    # ── Phase 2c: commit through Workspace, push to CF ──────────────
-    # Git-aware ops live on the workspace struct; pull it from its
-    # mount slot, commit, then push the underlying repo to CF.
+    # Commit through Workspace, push to CF.
     ws = workspace_from(fs1, "/repo")
 
-    {:ok, [{:modified, "README.md"}, {:added, "notes.md"}], ws} =
-      sorted_diff(ws)
+    {:ok, [{:modified, "README.md"}, {:added, "notes.md"}], ws} = sorted_diff(ws)
 
     {:ok, _commit_sha, ws} =
       Workspace.commit(ws,
@@ -116,7 +153,10 @@ defmodule VFS.Integration.CloudflareArtifactsTest do
         update_ref: ref
       )
 
-    {:ok, _push} = Exgit.push(ws.repo, transport(url, tok), refspecs: [ref])
+    {timings, _} =
+      timed(timings, :push_modified, fn ->
+        {:ok, _} = Exgit.push(ws.repo, transport, refspecs: [ref])
+      end)
 
     # ── Phase 3: "pause" — drop ALL agent-1 state ───────────────────
     fs1 = nil
@@ -125,9 +165,12 @@ defmodule VFS.Integration.CloudflareArtifactsTest do
     _ = {fs1, ws, agent1_repo}
 
     # ── Phase 4: "rehydrate" — fresh clone, fresh mount, verify ─────
-    {:ok, agent2_repo} = Exgit.clone(transport(url, tok))
+    {timings, agent2_repo} =
+      timed(timings, :clone_rehydrate, fn ->
+        {:ok, repo} = Exgit.clone(transport)
+        repo
+      end)
 
-    # Brand-new object store, brand-new ref store. No shared state.
     refute identical_repos?(agent2_repo, seed_repo)
 
     fs2 =
@@ -135,23 +178,52 @@ defmodule VFS.Integration.CloudflareArtifactsTest do
       |> VFS.mount("/repo", Workspace.open(agent2_repo, remote_ref))
       |> VFS.mount("/scratch", VFS.Memory.new())
 
-    # The modification persisted across the pause.
     {:ok, ^new_readme, fs2} = VFS.read_file(fs2, "/repo/README.md")
-
-    # The new file persisted too.
     {:ok, ^notes, fs2} = VFS.read_file(fs2, "/repo/notes.md")
-
-    # The seed file untouched by agent 1 is still there.
     {:ok, "{\"v\":1}\n", fs2} = VFS.read_file(fs2, "/repo/config.json")
 
-    # readdir sees the full post-agent state without needing a walk
-    # (which would require materializing a lazy partial clone).
     {:ok, names, fs2} = VFS.readdir(fs2, "/repo")
     assert Enum.sort(Enum.to_list(names)) == ["README.md", "config.json", "notes.md"]
 
-    # Scratch is fresh — only durable repo state survived the pause.
-    assert {:error, %VFS.Error{kind: :enoent}} =
-             VFS.read_file(fs2, "/scratch/plan.md")
+    assert {:error, %VFS.Error{kind: :enoent}} = VFS.read_file(fs2, "/scratch/plan.md")
+
+    # ── Phase 5: cleanup is in on_exit; time it here for the report. ─
+    {timings, _} =
+      timed(timings, :delete_repo, fn ->
+        {:ok, _} = CloudflareArtifacts.delete_repo(client, repo_name)
+      end)
+
+    print_timings(timings, repo_name)
+  end
+
+  # ── timing ─────────────────────────────────────────────────────────
+
+  defp timed(map, label, fun) do
+    {micros, result} = :timer.tc(fun)
+    {Map.put(map, label, micros / 1000), result}
+  end
+
+  defp print_timings(timings, repo_name) do
+    order = [
+      :create_repo,
+      :mint_token,
+      :push_seed,
+      :clone_boot,
+      :push_modified,
+      :clone_rehydrate,
+      :delete_repo
+    ]
+
+    total = order |> Enum.map(&Map.fetch!(timings, &1)) |> Enum.sum()
+
+    IO.puts("\n  CF artifacts lifecycle for #{repo_name}:")
+
+    for op <- order do
+      ms = Map.fetch!(timings, op)
+      IO.puts("    #{String.pad_trailing(to_string(op), 18)} #{:io_lib.format(~c"~7.1f", [ms])} ms")
+    end
+
+    IO.puts("    #{String.pad_trailing("total", 18)} #{:io_lib.format(~c"~7.1f", [total])} ms\n")
   end
 
   # ── helpers ────────────────────────────────────────────────────────
@@ -218,11 +290,11 @@ defmodule VFS.Integration.CloudflareArtifactsTest do
     end
   end
 
-  # Sanity check that the rehydrated repo really is a fresh value, not
-  # a stale reference. Different object_store identities prove no
-  # cache leaked across the pause.
   defp identical_repos?(%Repository{object_store: a}, %Repository{object_store: b}), do: a == b
 
-  defp rand_suffix,
-    do: :crypto.strong_rand_bytes(4) |> Base.encode16(case: :lower)
+  defp blank?(nil), do: true
+  defp blank?(""), do: true
+  defp blank?(_), do: false
+
+  defp rand_suffix, do: :crypto.strong_rand_bytes(4) |> Base.encode16(case: :lower)
 end
