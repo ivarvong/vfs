@@ -203,28 +203,53 @@ defmodule VFS.Integration.CloudflareArtifactsTest do
     {Map.put(map, label, micros / 1000), result}
   end
 
+  @timing_order [
+    :create_repo,
+    :mint_token,
+    :push_seed,
+    :clone_boot,
+    :push_modified,
+    :clone_rehydrate,
+    :delete_repo
+  ]
+
   defp print_timings(timings, repo_name) do
-    order = [
-      :create_repo,
-      :mint_token,
-      :push_seed,
-      :clone_boot,
-      :push_modified,
-      :clone_rehydrate,
-      :delete_repo
-    ]
+    total = @timing_order |> Enum.map(&Map.fetch!(timings, &1)) |> Enum.sum()
+    payload = build_payload(timings, repo_name, total)
 
-    total = order |> Enum.map(&Map.fetch!(timings, &1)) |> Enum.sum()
+    case System.get_env("CF_BENCH_LOG") do
+      nil -> print_human(payload)
+      "" -> print_human(payload)
+      path -> append_jsonl(path, payload)
+    end
+  end
 
+  defp build_payload(timings, repo_name, total) do
+    %{
+      ts: DateTime.utc_now() |> DateTime.to_iso8601(),
+      repo: repo_name,
+      total_ms: round_ms(total),
+      ops: Map.new(@timing_order, fn op -> {op, round_ms(Map.fetch!(timings, op))} end)
+    }
+  end
+
+  defp print_human(%{repo: repo_name, total_ms: total, ops: ops}) do
     IO.puts("\n  CF artifacts lifecycle for #{repo_name}:")
 
-    for op <- order do
-      ms = Map.fetch!(timings, op)
+    for op <- @timing_order do
+      ms = Map.fetch!(ops, op)
       IO.puts("    #{String.pad_trailing(to_string(op), 18)} #{:io_lib.format(~c"~7.1f", [ms])} ms")
     end
 
     IO.puts("    #{String.pad_trailing("total", 18)} #{:io_lib.format(~c"~7.1f", [total])} ms\n")
   end
+
+  defp append_jsonl(path, payload) do
+    line = Jason.encode!(payload) <> "\n"
+    File.write!(path, line, [:append])
+  end
+
+  defp round_ms(ms), do: Float.round(ms, 1)
 
   # ── helpers ────────────────────────────────────────────────────────
 
