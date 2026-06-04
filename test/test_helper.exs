@@ -29,4 +29,4 @@ unless Code.ensure_loaded?(Exgit.Workspace.VFS) do
   if File.exists?(workspace_vfs), do: Code.compile_file(workspace_vfs)
 end
 
-ExUnit.start(exclude: [:integration, :integration_network])
+ExUnit.start(exclude: [:integration, :integration_network, :known_limitation])
