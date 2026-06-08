@@ -293,7 +293,7 @@ mix dialyzer
 mix docs                   # ex_doc — first sentence of @moduledoc lands on hex.pm, write it deliberately
 mix vfs.mutate             # mutation testing — run periodically, NOT in mix check (slow)
 mix vfs.mutate --file lib/vfs/memory.ex  # single file
-mix vfs.audit              # static perf audit (regex-based; see lib/mix/tasks/vfs.audit.ex)
+mix vfs.audit              # static perf audit (regex-based; see dev/mix/tasks/vfs.audit.ex)
 mix run bench/path.exs     # individual benchmarks; see bench/baselines.md
 ```
 
