@@ -10,6 +10,10 @@ will always be flagged here.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-06-08
+
+First public release.
+
 ### Audit (2026-05-02): four contract bugs found and fixed
 
 A staff-level review surfaced four bugs that the existing 100%-coverage,
@@ -96,3 +100,6 @@ published contract." Each is now a property in `test/vfs/contracts_test.exs`.
 - Telemetry events under the `[:vfs, _, _]` prefix for every public op.
 - `VFS.assert_implemented!/1` for validating values at trust boundaries.
 - Conformance test harness (`VFS.ConformanceCase`) parametrized over backend impls.
+
+[Unreleased]: https://github.com/ivarvong/vfs/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/ivarvong/vfs/releases/tag/v0.1.0

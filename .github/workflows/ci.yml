@@ -17,7 +17,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Floor: confirms the library still works for users on the minimum.
+          # Floor: confirms the library still works for users on the declared
+          # minimum (~> 1.16). 1.16 predates OTP 27, so it pairs with OTP 26.
+          - elixir: "1.16.3"
+            otp: "26.2"
+            consolidate: "false"
+          # Mid: a current stable line.
           - elixir: "1.18.4"
             otp: "27.2"
             consolidate: "false"

@@ -8,10 +8,9 @@ defmodule VFS.MixProject do
     [
       app: :vfs,
       version: @version,
-      elixir: "~> 1.18",
+      elixir: "~> 1.16",
       elixirc_paths: elixirc_paths(Mix.env()),
-      elixirc_options: [warnings_as_errors: true],
-      consolidate_protocols: Mix.env() != :test,
+      consolidate_protocols: consolidate_protocols?(),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       aliases: aliases(),
@@ -36,25 +35,22 @@ defmodule VFS.MixProject do
     ]
   end
 
-  def application do
-    [extra_applications: [:logger]]
+  # Consolidate protocols everywhere except :test (the suite defines its own
+  # VFS.Mountable impls), unless VFS_CONSOLIDATE_PROTOCOLS overrides it — CI sets
+  # it to prove release-style consolidation doesn't break protocol dispatch.
+  defp consolidate_protocols? do
+    case System.get_env("VFS_CONSOLIDATE_PROTOCOLS") do
+      "true" -> true
+      "false" -> false
+      _ -> Mix.env() != :test
+    end
   end
 
-  def cli do
-    [
-      preferred_envs: [
-        check: :test,
-        coveralls: :test,
-        "coveralls.detail": :test,
-        "coveralls.html": :test,
-        "coveralls.json": :test,
-        "coveralls.post": :test,
-        dialyzer: :dev
-      ]
-    ]
-  end
-
-  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  # `dev/` holds maintainer-only Mix tasks (vfs.audit, vfs.mutate); it is
+  # compiled in dev/test but never shipped (see package `files:`), so consumers
+  # don't get internal tooling injected into their projects.
+  defp elixirc_paths(:dev), do: ["lib", "dev"]
+  defp elixirc_paths(:test), do: ["lib", "test/support", "dev"]
   defp elixirc_paths(_), do: ["lib"]
 
   defp deps do

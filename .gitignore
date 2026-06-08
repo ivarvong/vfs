@@ -28,3 +28,6 @@ vfs-*.tar
 # Dialyzer PLT files
 /priv/plts/*.plt
 /priv/plts/*.plt.hash
+
+# local secrets
+.env
