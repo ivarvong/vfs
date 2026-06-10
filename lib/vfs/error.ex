@@ -96,6 +96,36 @@ defmodule VFS.Error do
     %{err | mount: mount}
   end
 
+  @doc """
+  Rewrite the `:path` field on an existing error, regenerating the
+  default message to match. Used by the mount-table dispatcher: backends
+  report paths in their own namespace (mount prefix stripped), and the
+  dispatcher rewrites them into the user's namespace — the
+  human-readable message must follow, or logs name a path that does not
+  exist in the user's view.
+
+  A custom message (one the backend set explicitly) is preserved.
+
+  ## Examples
+
+      iex> err = VFS.Error.new(:enoent, path: "/x") |> VFS.Error.put_path("/repo/x")
+      iex> Exception.message(err)
+      ":enoent at /repo/x"
+
+      iex> err = VFS.Error.new(:eio, path: "/x", message: "disk on fire")
+      iex> VFS.Error.put_path(err, "/repo/x").message
+      "disk on fire"
+  """
+  @spec put_path(t(), String.t()) :: t()
+  def put_path(%__MODULE__{} = err, path) when is_binary(path) do
+    message =
+      if err.message == default_message(err.kind, err.path),
+        do: default_message(err.kind, path),
+        else: err.message
+
+    %{err | path: path, message: message}
+  end
+
   defp default_message(kind, nil), do: inspect(kind)
   defp default_message(kind, path), do: "#{inspect(kind)} at #{path}"
 end

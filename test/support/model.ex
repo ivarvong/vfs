@@ -93,7 +93,9 @@ defmodule VFS.Test.Model do
 
     cond do
       Map.has_key?(m.files, p) -> {:error, :eexist}
-      MapSet.member?(m.dirs, p) -> {:error, :eexist}
+      # Any existing directory — explicit, implicit, or root — is
+      # :eexist, except under parents? where mkdir -p no-ops.
+      directory?(m, p) -> if parents?, do: {:ok, m}, else: {:error, :eexist}
       ancestor_is_file?(m, p) -> {:error, :enotdir}
       parents? -> {:ok, mkdir_p(m, p)}
       not directory?(m, VFS.Path.dirname(p)) -> {:error, :enoent}

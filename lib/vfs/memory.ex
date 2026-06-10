@@ -39,6 +39,9 @@ defmodule VFS.Memory do
 
   Raises `ArgumentError` if the seed is malformed:
 
+    * Every key must be a path binary and every value a binary —
+      anything else fails here, at construction, instead of deferring
+      the crash to the first `stat`/`read`.
     * The literal `"/"` cannot be a file (root is always a directory).
     * No two paths can be in a strict path-segment-prefix relationship
       (e.g. `%{"/a" => "...", "/a/b" => "..."}` is rejected — `/a`
@@ -67,6 +70,7 @@ defmodule VFS.Memory do
   def new(initial \\ %{}) when is_map(initial) do
     normalized =
       for {path, content} <- initial, into: %{} do
+        validate_entry!(path, content)
         {VFS.Path.normalize(path), content}
       end
 
@@ -82,6 +86,22 @@ defmodule VFS.Memory do
       }
     end)
   end
+
+  # Seeds come from external sources (config files, DB dumps,
+  # LLM-generated tool calls); a non-binary key or value must fail here
+  # with a clear message, not as a FunctionClauseError at first read.
+  defp validate_entry!(path, _content) when not is_binary(path) do
+    raise ArgumentError,
+          "VFS.Memory seed keys must be path binaries, got: #{inspect(path)}"
+  end
+
+  defp validate_entry!(path, content) when not is_binary(content) do
+    raise ArgumentError,
+          "VFS.Memory seed value for #{inspect(path)} must be a binary, " <>
+            "got: #{inspect(content)}"
+  end
+
+  defp validate_entry!(_path, _content), do: :ok
 
   # Reject seeds that would produce contradictory state.
   #
@@ -218,8 +238,14 @@ defimpl VFS.Mountable, for: VFS.Memory do
       Map.has_key?(mem.tree, p) ->
         {:error, Error.new(:eexist, path: p)}
 
-      MapSet.member?(mem.dirs, p) ->
-        {:error, Error.new(:eexist, path: p)}
+      # Covers root, explicit dirs, AND implicit dirs (ancestors of
+      # existing files) — :eexist means "exists", however it came to be.
+      # With parents: true an existing directory is mkdir -p's success
+      # no-op, so repeated calls converge.
+      directory?(mem, p) ->
+        if parents?,
+          do: {:ok, mem},
+          else: {:error, Error.new(:eexist, path: p)}
 
       ancestor_is_file?(mem, p) ->
         {:error, Error.new(:enotdir, path: p)}

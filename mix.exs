@@ -4,6 +4,12 @@ defmodule VFS.MixProject do
   @version "0.1.0"
   @source_url "https://github.com/ivarvong/vfs"
 
+  # `coveralls` only exists in :test; without this, a bare `mix check`
+  # from the default dev env dies at the last gate step.
+  def cli do
+    [preferred_envs: [check: :test, coveralls: :test, "coveralls.html": :test]]
+  end
+
   def project do
     [
       app: :vfs,
@@ -74,7 +80,7 @@ defmodule VFS.MixProject do
 
   defp aliases do
     [
-      setup: ["deps.get", "dialyzer --plt"],
+      setup: ["deps.get", "dialyzer --plt", &install_pre_commit_hook/1],
       check: [
         "format --check-formatted",
         "compile --warnings-as-errors --force",
@@ -83,6 +89,17 @@ defmodule VFS.MixProject do
         "coveralls --raise"
       ]
     ]
+  end
+
+  # CLAUDE.md promises `mix setup` wires the local pre-commit gate.
+  defp install_pre_commit_hook(_args) do
+    hook = ".git/hooks/pre-commit"
+
+    if File.dir?(Path.dirname(hook)) do
+      File.write!(hook, "#!/bin/sh\nexec mix check\n")
+      File.chmod!(hook, 0o755)
+      Mix.shell().info("Installed #{hook} (runs mix check)")
+    end
   end
 
   defp description do
@@ -103,9 +120,12 @@ defmodule VFS.MixProject do
       main: "readme",
       source_ref: "v#{@version}",
       extras: ["README.md", "SPEC.md", "CHANGELOG.md"],
+      # Docs build in :dev, where dev/ (maintainer-only Mix tasks) is
+      # compiled; without the filter those tasks leak into hexdocs.
+      filter_modules: ~r/^Elixir\.VFS(\.|$)/,
       groups_for_modules: [
-        Core: [VFS, VFS.Mountable, VFS.Stat, VFS.Path],
-        "Backends & helpers": [VFS.Memory, VFS.Skeleton, VFS.Default]
+        Core: [VFS, VFS.Mountable, VFS.Stat, VFS.Path, VFS.Error],
+        "Backends & helpers": [VFS.Memory, VFS.Skeleton, VFS.Default, VFS.StreamOptions]
       ]
     ]
   end

@@ -80,13 +80,13 @@ This is the design that lets vfs front a real S3 or git backend with realistical
 
 ## Read API: `stream_read/3` is primary, `read_file/2` is derived
 
-The `VFS.Skeleton` macro supplies a default `read_file/2` that runs `stream_read` into a binary via `IO.iodata_to_binary`. New backends implement `stream_read/3` and let the skeleton derive the rest. Override `read_file/2` only when there's a measurably faster eager path (e.g. `VFS.Memory`, where the bytes are already in hand).
+`read_file/2` is not a protocol op at all: the public helper `VFS.read_file/2` runs `stream_read/3` into a binary via `IO.iodata_to_binary`, so every backend gets the eager read for free. New backends implement `stream_read/3` only. A backend with a measurably faster eager path (e.g. `VFS.Memory`, where the bytes are already in hand) returns a single-chunk stream from `stream_read/3`.
 
 If you ever materialize a binary to then re-stream it, you're doing it backwards.
 
 ## Keep the protocol minimal — the bar for new ops is high
 
-The v0.1 protocol surface is **9 callbacks**: `exists?`, `stat`, `readdir`, `stream_read`, `walk`, `write_file`, `mkdir`, `rm`, `materialize`, `capabilities`.
+The v0.1 protocol surface is **10 callbacks**: `exists?`, `stat`, `readdir`, `stream_read`, `walk`, `write_file`, `mkdir`, `rm`, `materialize`, `capabilities`.
 
 A new protocol op is justified only when:
 
@@ -107,7 +107,7 @@ Backend-specific perf optimizations (e.g. an exgit pack-internal scanner) live i
 
 ## Capabilities
 
-`capabilities/1` returns `MapSet.t(atom)`. Documented atoms: `:read`, `:write`, `:native_walk`, `:native_stream_read`, `:lazy`. Don't introduce new ones without a concrete consumer that needs to branch on them.
+`capabilities/1` returns `MapSet.t(atom)`. Documented atoms: `:read`, `:write`, `:mkdir` (write does not imply mkdir — flat-keyed backends like S3 support `:write` without it), `:native_walk`, `:native_stream_read`, `:lazy`. Don't introduce new ones without a concrete consumer that needs to branch on them.
 
 ## Observability — `:telemetry` events, OTel-ready
 
@@ -229,9 +229,9 @@ These rules sit alongside the existing testing bar:
 
 **Versions:**
 
-- **Elixir floor for users: `~> 1.18`** in `mix.exs` (the `elixir:` requirement). Set-theoretic types in compiler warnings, `mix format --migrate`, parametric type checking — all available from 1.18.
-- **Local dev + CI run on the latest pre-release** (1.20-rc as of this writing). We deliberately ride the bleeding edge of the toolchain so new compiler warnings, type-inference checks, and `mix xref` capabilities surface here first. Anything 1.20-rc flags, we fix or pragma. The `mise.toml` / `.tool-versions` pins the rc; users on 1.18 still get a working library.
-- CI matrix: `{1.18 stable, 1.20-rc}` × `{OTP latest two}`. The 1.18 leg confirms the floor still works; the 1.20-rc leg is the real gate.
+- **Elixir floor for users: `~> 1.16`** in `mix.exs` (the `elixir:` requirement), lowered from 1.18 for 0.1.0 (commit `bf985da`) — nothing in `lib/` needs anything newer, and a foundational dep should run everywhere its consumers do. The 1.18+ niceties (set-theoretic type warnings, parametric type checking) still apply to *development*, which runs on the bleeding edge.
+- **Local dev + CI also run the latest pre-release** (1.20-rc as of this writing). We deliberately ride the bleeding edge of the toolchain so new compiler warnings, type-inference checks, and `mix xref` capabilities surface here first. Anything 1.20-rc flags, we fix or pragma. The `mise.toml` / `.tool-versions` pins the rc; users on 1.16 still get a working library.
+- CI matrix: four legs — `1.16.3/OTP 26.2` (floor), `1.18.4/OTP 27.2` (current stable), `1.20-rc/OTP 27.2` (bleeding edge, the real gate), and `1.18.4/OTP 27.2` again with `VFS_CONSOLIDATE_PROTOCOLS=true` (release-style consolidation).
 
 **The `mix check` aggregator is the single command that gates every commit.** Defined as an alias in `mix.exs`:
 
@@ -291,6 +291,8 @@ mix format                 # auto-fix + --migrate for deprecated forms
 mix credo
 mix dialyzer
 mix docs                   # ex_doc — first sentence of @moduledoc lands on hex.pm, write it deliberately
+                           # (a cosmetic beam_load error about 'Elixir.Vfs' on macOS is ex_doc camelizing
+                           # the :vfs app name + case-insensitive APFS serving Elixir.VFS.beam — harmless)
 mix vfs.mutate             # mutation testing — run periodically, NOT in mix check (slow)
 mix vfs.mutate --file lib/vfs/memory.ex  # single file
 mix vfs.audit              # static perf audit (regex-based; see dev/mix/tasks/vfs.audit.ex)
@@ -309,8 +311,10 @@ mix run bench/path.exs     # individual benchmarks; see bench/baselines.md
   signal to investigate before merging.
 - The mount-table tax is real (~1–2 µs/op). For tight inner loops where
   the mount is fixed, consider calling the backend's `defimpl` directly
-  via `VFS.Mountable.read_file(backend, path)` instead of going through
-  `VFS.read_file(mount_table, path)`.
+  via `VFS.Mountable.stream_read(backend, path, [])` instead of going
+  through `VFS.read_file(mount_table, path)` (there is no
+  `VFS.Mountable.read_file/2` — the eager read is a `VFS`-helper
+  derivation).
 
 ## Mutation testing
 

@@ -57,7 +57,7 @@ BEAM nodes — anywhere a value travels.
 
 For a guided walkthrough — every design decision demonstrated in
 runnable Elixir, organized around three real agent-loop scenarios —
-read [`test/showcase_test.exs`](./test/showcase_test.exs):
+read [`test/showcase_test.exs`](https://github.com/ivarvong/vfs/blob/main/test/showcase_test.exs):
 
 ```sh
 mix test test/showcase_test.exs --trace                                   # local sections
@@ -77,7 +77,7 @@ Recommended starting point.
 
 ## Worked examples
 
-Real-network demos in [`examples/`](./examples):
+Real-network demos in [`examples/`](https://github.com/ivarvong/vfs/tree/main/examples):
 
 ```sh
 # Structured codesearch: clone anthropics/skills, parse YAML front-matter
@@ -104,7 +104,7 @@ in `test/integration/exgit_test.exs` and against a live GitHub clone in
 
 ## Performance
 
-Reference numbers in [`bench/baselines.md`](./bench/baselines.md). On an
+Reference numbers in [`bench/baselines.md`](https://github.com/ivarvong/vfs/blob/main/bench/baselines.md). On an
 M3 Max under Elixir 1.20-rc.3:
 
 - `VFS.Path.normalize/1` — 250 ns–1 µs (every public op normalizes once)
@@ -116,11 +116,11 @@ M3 Max under Elixir 1.20-rc.3:
 
 ```elixir
 def deps do
-  [{:vfs, github: "ivarvong/vfs"}]
+  [{:vfs, "~> 0.1.0"}]
 end
 ```
 
-(Not yet published to hex.pm.)
+Requires Elixir 1.16+.
 
 ## Development
 
@@ -134,4 +134,4 @@ mix test      # fast loop
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+MIT — see [LICENSE](https://github.com/ivarvong/vfs/blob/main/LICENSE).
