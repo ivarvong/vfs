@@ -8,9 +8,12 @@ defmodule VFS do
   mount tables nest naturally — you can mount a `%VFS{}` inside another
   `%VFS{}` for namespacing.
 
-  Every public op in this module is wrapped in `:telemetry.span/3` so
-  consumers can attach OpenTelemetry, log, or metric handlers. See
-  "Telemetry events" below.
+  The data-flow ops in this module — `read_file/2`, `stream_read/3`,
+  `write_file/4`, `mkdir/3`, `rm/3`, `walk/3`, `materialize/2` — are
+  wrapped in `:telemetry.span/3` so consumers can attach OpenTelemetry,
+  log, or metric handlers. The cheap lookups (`exists?/2`, `stat/2`,
+  `readdir/2`, `capabilities/1`) are not instrumented. The "Telemetry
+  events" section below is the full, exact contract.
 
   ## Quick tour
 
@@ -193,9 +196,16 @@ defmodule VFS do
           {:ok, VFS.Stat.t(), Mountable.t()} | {:error, Error.t()}
   def stat(impl, path), do: Mountable.stat(impl, path)
 
-  @doc "List entries directly under directory `path`."
+  @doc """
+  List entries directly under directory `path`.
+
+  Returns an `t:Enumerable.t/0` of names: a list for bounded backends,
+  a `Stream` for paginated or unbounded ones. Treat it as an Enumerable
+  — `Enum.to_list/1` only when you know the listing is bounded,
+  `Stream.take/2` when you don't. See `VFS.Mountable.readdir/2`.
+  """
   @spec readdir(Mountable.t(), String.t()) ::
-          {:ok, [String.t()], Mountable.t()} | {:error, Error.t()}
+          {:ok, Enumerable.t(String.t()), Mountable.t()} | {:error, Error.t()}
   def readdir(impl, path), do: Mountable.readdir(impl, path)
 
   @doc "Pre-warm any internal cache. See `VFS.Mountable.materialize/2`."
@@ -297,7 +307,8 @@ defmodule VFS do
   def __synthetic_children__(%__MODULE__{mounts: mounts}, path) do
     prefix = if path == "/", do: "/", else: path <> "/"
 
-    Enum.flat_map(mounts, fn {mp, _} ->
+    mounts
+    |> Enum.flat_map(fn {mp, _} ->
       if mp != path and String.starts_with?(mp, prefix) do
         rest = String.replace_prefix(mp, prefix, "")
         [rest |> String.split("/", parts: 2) |> hd()]
@@ -305,6 +316,9 @@ defmodule VFS do
         []
       end
     end)
+    # Sibling mounts under a shared parent (/a/b and /a/c) each
+    # contribute "a" — emit it once or readdir lists duplicates.
+    |> Enum.uniq()
   end
 
   # ── telemetry helpers ─────────────────────────────────────────────────────
@@ -418,7 +432,7 @@ defimpl VFS.Mountable, for: VFS do
             end
 
           {:error, %Error{} = err} ->
-            {:error, Error.put_mount(%{err | path: p}, mp)}
+            {:error, err |> Error.put_path(p) |> Error.put_mount(mp)}
         end
 
       :no_mount ->
@@ -444,7 +458,7 @@ defimpl VFS.Mountable, for: VFS do
             {:ok, Enum.sort(synthetic), vfs}
 
           {:error, %Error{} = err} ->
-            {:error, Error.put_mount(%{err | path: p}, mp)}
+            {:error, err |> Error.put_path(p) |> Error.put_mount(mp)}
         end
 
       :no_mount ->
@@ -558,7 +572,7 @@ defimpl VFS.Mountable, for: VFS do
             {:ok, payload, VFS.__put_mount__(vfs, mp, new_backend)}
 
           {:error, %Error{} = err} ->
-            {:error, Error.put_mount(%{err | path: p}, mp)}
+            {:error, err |> Error.put_path(p) |> Error.put_mount(mp)}
         end
 
       :no_mount ->
@@ -576,7 +590,7 @@ defimpl VFS.Mountable, for: VFS do
             {:ok, VFS.__put_mount__(vfs, mp, new_backend)}
 
           {:error, %Error{} = err} ->
-            {:error, Error.put_mount(%{err | path: p}, mp)}
+            {:error, err |> Error.put_path(p) |> Error.put_mount(mp)}
         end
 
       :no_mount ->

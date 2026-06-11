@@ -4,14 +4,19 @@ defmodule VFS.MixProject do
   @version "0.1.0"
   @source_url "https://github.com/ivarvong/vfs"
 
+  # `coveralls` only exists in :test; without this, a bare `mix check`
+  # from the default dev env dies at the last gate step.
+  def cli do
+    [preferred_envs: [check: :test, coveralls: :test, "coveralls.html": :test]]
+  end
+
   def project do
     [
       app: :vfs,
       version: @version,
-      elixir: "~> 1.18",
+      elixir: "~> 1.16",
       elixirc_paths: elixirc_paths(Mix.env()),
-      elixirc_options: [warnings_as_errors: true],
-      consolidate_protocols: Mix.env() != :test,
+      consolidate_protocols: consolidate_protocols?(),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       aliases: aliases(),
@@ -36,25 +41,22 @@ defmodule VFS.MixProject do
     ]
   end
 
-  def application do
-    [extra_applications: [:logger]]
+  # Consolidate protocols everywhere except :test (the suite defines its own
+  # VFS.Mountable impls), unless VFS_CONSOLIDATE_PROTOCOLS overrides it — CI sets
+  # it to prove release-style consolidation doesn't break protocol dispatch.
+  defp consolidate_protocols? do
+    case System.get_env("VFS_CONSOLIDATE_PROTOCOLS") do
+      "true" -> true
+      "false" -> false
+      _ -> Mix.env() != :test
+    end
   end
 
-  def cli do
-    [
-      preferred_envs: [
-        check: :test,
-        coveralls: :test,
-        "coveralls.detail": :test,
-        "coveralls.html": :test,
-        "coveralls.json": :test,
-        "coveralls.post": :test,
-        dialyzer: :dev
-      ]
-    ]
-  end
-
-  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  # `dev/` holds maintainer-only Mix tasks (vfs.audit, vfs.mutate); it is
+  # compiled in dev/test but never shipped (see package `files:`), so consumers
+  # don't get internal tooling injected into their projects.
+  defp elixirc_paths(:dev), do: ["lib", "dev"]
+  defp elixirc_paths(:test), do: ["lib", "test/support", "dev"]
   defp elixirc_paths(_), do: ["lib"]
 
   defp deps do
@@ -78,7 +80,7 @@ defmodule VFS.MixProject do
 
   defp aliases do
     [
-      setup: ["deps.get", "dialyzer --plt"],
+      setup: ["deps.get", "dialyzer --plt", &install_pre_commit_hook/1],
       check: [
         "format --check-formatted",
         "compile --warnings-as-errors --force",
@@ -87,6 +89,17 @@ defmodule VFS.MixProject do
         "coveralls --raise"
       ]
     ]
+  end
+
+  # CLAUDE.md promises `mix setup` wires the local pre-commit gate.
+  defp install_pre_commit_hook(_args) do
+    hook = ".git/hooks/pre-commit"
+
+    if File.dir?(Path.dirname(hook)) do
+      File.write!(hook, "#!/bin/sh\nexec mix check\n")
+      File.chmod!(hook, 0o755)
+      Mix.shell().info("Installed #{hook} (runs mix check)")
+    end
   end
 
   defp description do
@@ -107,9 +120,12 @@ defmodule VFS.MixProject do
       main: "readme",
       source_ref: "v#{@version}",
       extras: ["README.md", "SPEC.md", "CHANGELOG.md"],
+      # Docs build in :dev, where dev/ (maintainer-only Mix tasks) is
+      # compiled; without the filter those tasks leak into hexdocs.
+      filter_modules: ~r/^Elixir\.VFS(\.|$)/,
       groups_for_modules: [
-        Core: [VFS, VFS.Mountable, VFS.Stat, VFS.Path],
-        "Backends & helpers": [VFS.Memory, VFS.Skeleton, VFS.Default]
+        Core: [VFS, VFS.Mountable, VFS.Stat, VFS.Path, VFS.Error],
+        "Backends & helpers": [VFS.Memory, VFS.Skeleton, VFS.Default, VFS.StreamOptions]
       ]
     ]
   end

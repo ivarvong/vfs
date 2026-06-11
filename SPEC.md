@@ -8,6 +8,8 @@ A new library that replaces `feat/mountable-virtual-filesystem-core` in `just_ba
 >
 > **Status**: design decisions settled below; staff-reviewed by @daveLucia.
 >
+> **Amended 2026-06-10** (pre-0.1.0 release): code sketches below were written before implementation and have been updated to match the shipped surface — the 10-callback protocol, `%VFS.Error{}` struct returns (the draft used bare atoms), the trimmed capability set, and no `grep`/`glob`/`cp`/`mv` helpers in the library (consumer-side compositions). The decision table and rationale are original. Where this document and the code disagree, that is a bug — see CLAUDE.md.
+>
 > | Decision | Choice |
 > |---|---|
 > | Protocol name | `VFS.Mountable` (renamed from `VFS.Filesystem` per Dave — "filesystem" is overloaded) |
@@ -38,8 +40,8 @@ A new library that replaces `feat/mountable-virtual-filesystem-core` in `just_ba
 2. **Reads thread state back, not just writes.** This is the single biggest defect in the existing `JustBash.FS.Backend` behaviour and the reason `GitFS.materialize/1` had to exist as a workaround. With `read_file(impl, path) :: {:ok, binary, impl} | {:error, reason}`, a lazy `GitFS` cache is preserved across reads.
 3. **Mount-table-as-FS.** The `VFS.t()` struct (mount table + dispatch) itself implements `VFS.Mountable`. Mount tables nest. `LayeredFS` doesn't need to know whether its inner is a single backend or a mount table.
 4. **Lazy by default.** `stream_read/3` is the protocol's primary read primitive (returns `Enumerable.t()`). `read_file/2` is a thin helper that runs the stream into a binary. Backends that have a natural eager path can override `read_file` directly; backends with a natural streaming path implement `stream_read` and get `read_file` for free. This is the substantive shift from the previous draft, where `read_file` was primary and `stream_read` was bolted on.
-5. **Tiny v1 surface.** Library ships: protocol, `%VFS{}` mount table, `VFS.Memory`, `VFS.Path`, `VFS.Stat`, `VFS.Skeleton`, `VFS.Default`. **No `VFS.Git`** (lives as a `defimpl` inside `:exgit`). **No `VFS.Overlay` / `VFS.ReadOnly`** (documented patterns, not stock impls). Caller-provided is one `defimpl`.
-6. **Two primitives, anything composes on top.** `walk/3` (lazy tree traversal yielding `{path, stat}`) and `stream_read/3` (lazy per-file byte stream) are the universal read-side primitives. Together they're sufficient to build grep, mapreduce, fulltext indexing, content-addressed dedup, sync, backup, stats — any bulk operation a consumer wants. `grep` and `glob` are `VFS` module helpers, not protocol ops; `%VFS.Match{}` was a smell because it was an op-specific result type leaking into the universal interface. Backend-specific perf optimizations live as backend-specific functions (e.g. `Exgit.FS.grep/4`); cross-backend pushdown for a recurring pattern gets a future optional secondary protocol (`VFS.Searchable`, `VFS.ContentAddressed`, etc.) — not pollution of the core.
+5. **Tiny v1 surface.** Library ships: protocol, `%VFS{}` mount table, `VFS.Memory`, `VFS.Path`, `VFS.Stat`, `VFS.Error`, `VFS.StreamOptions`, `VFS.Skeleton`, `VFS.Default`. **No `VFS.Git`** (lives as a `defimpl` inside `:exgit`). **No `VFS.Overlay` / `VFS.ReadOnly`** (documented patterns, not stock impls). Caller-provided is one `defimpl`.
+6. **Two primitives, anything composes on top.** `walk/3` (lazy tree traversal yielding `{path, stat}`) and `stream_read/3` (lazy per-file byte stream) are the universal read-side primitives. Together they're sufficient to build grep, mapreduce, fulltext indexing, content-addressed dedup, sync, backup, stats — any bulk operation a consumer wants. `grep` and `glob` are consumer-side compositions (or a future companion package), not protocol ops and not library helpers; `%VFS.Match{}` was a smell because it was an op-specific result type leaking into the universal interface. Backend-specific perf optimizations live as backend-specific functions (e.g. `Exgit.FS.grep/4`); cross-backend pushdown for a recurring pattern gets a future optional secondary protocol (`VFS.Searchable`, `VFS.ContentAddressed`, etc.) — not pollution of the core.
 7. **Both consumer libs converge on this protocol.** `just_bash` deletes its `FS.Backend` behaviour and its in-memory/RO impls; `pyex` deletes `Pyex.Filesystem` and its `Memory` impl. Both now hold a `VFS.t()` and pass it back to the caller after every operation.
 
 ---
@@ -89,7 +91,9 @@ vfs/
 │   │   ├── path.ex                # Pure path utilities (normalize, dirname, basename, resolve)
 │   │   ├── stat.ex                # %VFS.Stat{type, size, mtime, mode}
 │   │   ├── memory.ex              # In-memory backend (the only stock impl)
-│   │   ├── default.ex             # Default impls of stream_read/walk/glob/grep used by Skeleton
+│   │   ├── default.ex             # Default `walk` impl used by Skeleton
+│   │   ├── error.ex               # %VFS.Error{kind, path, mount, message} exception
+│   │   ├── stream_options.ex      # chunk_size / byte_range / line_range handling
 │   │   └── skeleton.ex            # `use VFS.Skeleton` macro for impl authors
 └── mix.exs
 
@@ -172,180 +176,131 @@ defprotocol VFS.Mountable do
 
   ## Errors
 
-  POSIX-style atoms, identical to the set the old `JustBash.FS.Backend`
-  used: `:enoent`, `:eexist`, `:eisdir`, `:enotdir`, `:erofs`, `:eacces`,
-  `:einval`, `:exdev`, `:eio`, `:eloop`, plus `:enotsup` for backends that
-  don't support an op (e.g. `chmod` on a read-only git-backed mount).
+  Structured `%VFS.Error{kind, path, mount, message}` exceptions. `:kind`
+  follows POSIX: `:enoent`, `:eexist`, `:eisdir`, `:enotdir`, `:erofs`,
+  `:eacces`, `:einval`, `:exdev`, `:eio`, `:eloop`, plus `:enotsup` for
+  backends that don't support an op.
   """
 
   @type t :: struct()
   @type path :: String.t()
-  @type reason :: atom()
 
   # ── queries — return state because lazy backends mutate cache on read ──
 
   @spec exists?(t, path) :: {boolean, t}
   def exists?(impl, path)
 
-  @spec stat(t, path) :: {:ok, VFS.Stat.t(), t} | {:error, reason}
+  @spec stat(t, path) :: {:ok, VFS.Stat.t(), t} | {:error, VFS.Error.t()}
   def stat(impl, path)
 
-  @spec lstat(t, path) :: {:ok, VFS.Stat.t(), t} | {:error, reason}
-  def lstat(impl, path)
-
-  @spec readdir(t, path) :: {:ok, [String.t()], t} | {:error, reason}
+  # Bounded backends return a list of names; paginated/unbounded backends
+  # return a Stream. Consumers treat the result as an Enumerable.
+  @spec readdir(t, path) :: {:ok, Enumerable.t(String.t()), t} | {:error, VFS.Error.t()}
   def readdir(impl, path)
-
-  @spec readlink(t, path) :: {:ok, path, t} | {:error, reason}
-  def readlink(impl, path)
 
   # ── streaming reads are the primary read API ──
   #
   # `stream_read/3` is the protocol's only file-content read primitive.
   # `VFS.read_file/2` (the helper, not a protocol op) runs this stream into
-  # a binary for callers who want eager bytes. Backends with a natural
-  # eager path can opt out by overriding `VFS.Mountable.read_file/2` via
-  # an optional callback (default impl in `VFS.Default` does the iodata
-  # roll-up). Per Dave: file reads return "something you could pull out
-  # lazily as well" — making the lazy form primary means callers never pay
-  # for a 1 GiB blob materialization they didn't ask for.
-
-  @spec stream_read(t, path, keyword) :: {:ok, Enumerable.t(), t} | {:error, reason}
+  # a binary for callers who want eager bytes; backends with a natural eager
+  # path return a single-chunk stream. Per Dave: file reads return
+  # "something you could pull out lazily as well" — making the lazy form
+  # primary means callers never pay for a 1 GiB blob materialization they
+  # didn't ask for.
+  #
   # The Enumerable emits binary chunks. opts: :chunk_size (default 64 KiB),
   # :byte_range, :line_range. `t` returned in the success tuple is the
   # impl after any header/metadata reads needed to *open* the stream;
   # cache state populated *during* enumeration does not escape the stream
   # (see "cache-eviction caveat" below).
+  @spec stream_read(t, path, keyword) :: {:ok, Enumerable.t(binary), t} | {:error, VFS.Error.t()}
   def stream_read(impl, path, opts)
 
   # ── streaming tree walk ──
 
-  @spec walk(t, path, keyword) :: Enumerable.t()
-  # emits {path, %VFS.Stat{}}. opts: :max_depth, :follow_symlinks, :include_dirs (default false)
-  # `glob` and `grep` are NOT protocol ops — they're `VFS` module helpers
-  # composed from this + `stream_read`. Keeping the protocol minimal avoids
-  # forcing higher-order result shapes (e.g. a grep-specific `%VFS.Match{}`)
-  # into the universal interface.
+  # Emits {path, %VFS.Stat{}}. opts: :max_depth, :include_dirs (default
+  # false). Returns a bare Enumerable, not a {:ok, _, t} tuple — the one
+  # exception to state threading. `glob` and `grep` are NOT protocol ops —
+  # they're consumer-side compositions of this + `stream_read`. Keeping the
+  # protocol minimal avoids forcing higher-order result shapes (e.g. a
+  # grep-specific `%VFS.Match{}`) into the universal interface.
+  @spec walk(t, path, keyword) :: Enumerable.t({path, VFS.Stat.t()})
   def walk(impl, root, opts)
 
   # ── eager prefetch lever for lazy backends ──
 
-  @spec materialize(t, keyword) :: {:ok, t} | {:error, reason}
-  # No-op for Memory; e.g. Exgit.Repository.materialize/2 for an Exgit-backed mount.
-  # Useful when callers know they're about to do a full-tree scan and want to
-  # pay the network cost up front rather than per-blob during enumeration.
+  # No-op for Memory; e.g. Exgit.Repository.materialize/2 for an Exgit-backed
+  # mount. Useful when callers know they're about to do a full-tree scan and
+  # want to pay the network cost up front rather than per-blob during
+  # enumeration.
+  @spec materialize(t, keyword) :: {:ok, t} | {:error, VFS.Error.t()}
   def materialize(impl, opts)
-
-  # ── optional eager read override ──
-  #
-  # Backends with a naturally-eager read path (e.g. `VFS.Memory`) can override
-  # to skip the stream-then-concat round-trip. Default impl in `VFS.Skeleton`
-  # builds on `stream_read/3`. **Not part of the minimum required surface.**
-
-  @spec read_file(t, path) :: {:ok, binary, t} | {:error, reason}
-  def read_file(impl, path)
 
   # ── mutations ──
 
-  @spec write_file(t, path, binary, keyword) :: {:ok, t} | {:error, reason}
+  @spec write_file(t, path, binary, keyword) :: {:ok, t} | {:error, VFS.Error.t()}
   def write_file(impl, path, content, opts)
 
-  @spec append_file(t, path, binary) :: {:ok, t} | {:error, reason}
-  def append_file(impl, path, content)
-
-  @spec mkdir(t, path, keyword) :: {:ok, t} | {:error, reason}
+  @spec mkdir(t, path, keyword) :: {:ok, t} | {:error, VFS.Error.t()}
   def mkdir(impl, path, opts)
 
-  @spec rm(t, path, keyword) :: {:ok, t} | {:error, reason}
+  @spec rm(t, path, keyword) :: {:ok, t} | {:error, VFS.Error.t()}
   def rm(impl, path, opts)
-
-  @spec chmod(t, path, non_neg_integer) :: {:ok, t} | {:error, reason}
-  def chmod(impl, path, mode)
-
-  @spec symlink(t, path, path) :: {:ok, t} | {:error, reason}
-  def symlink(impl, target, link_path)
-
-  @spec link(t, path, path) :: {:ok, t} | {:error, reason}
-  def link(impl, existing, new)
 
   # ── capability introspection — lets callers fast-path or refuse ──
 
-  @spec capabilities(t) :: MapSet.t(atom)
+  @spec capabilities(t) :: MapSet.t(capability)
   def capabilities(impl)
 end
 ```
 
-Backends that don't support an op return `{:error, :enotsup}`. `capabilities/1` reports the set so callers can avoid trying. Capability atoms: `:read`, `:write`, `:symlinks`, `:hardlinks`, `:chmod`, `:append`, plus pushdown/streaming markers `:native_walk`, `:native_glob`, `:native_grep`, `:native_stream_read`, `:lazy` (the impl benefits from `materialize/2` before bulk reads).
+Ten callbacks — that is the entire shipped surface. The draft additionally
+sketched `lstat`, `readlink`, `read_file`-as-callback, `append_file`,
+`chmod`, `symlink`, and `link`; all were cut before 0.1 (no v1 backend used
+them — see the decision table).
+
+Backends that don't support an op return `{:error, %VFS.Error{kind: :enotsup}}`. `capabilities/1` reports the set so callers can avoid trying. Capability atoms: `:read`, `:write`, `:mkdir` (write does not imply mkdir — flat-keyed backends like S3 support `:write` without it), plus pushdown/streaming markers `:native_walk`, `:native_stream_read`, and `:lazy` (the impl benefits from `materialize/2` before bulk reads).
 
 ### Skeleton macro for impl authors
 
 ```elixir
 defmodule VFS.Skeleton do
   @moduledoc """
-  Default impls of `VFS.Mountable` ops a backend doesn't override. `use VFS.Skeleton`
-  inside a `defimpl` block; override only the ops your backend supports natively.
+  Default impls of the optional `VFS.Mountable` ops a backend doesn't
+  override. `use VFS.Skeleton` inside a `defimpl` block.
 
-  The required minimum for any backend: `stream_read/3`, `readdir/2`, `stat/2`,
-  `exists?/2`, `capabilities/1`. Everything else has a default here, including the
-  eager `read_file/2` (built on `stream_read`) and the streaming scans
-  (`walk`/`glob`/`grep`, composed from the required primitives).
+  The required minimum for any backend: `stream_read/3`, `readdir/2`,
+  `stat/2`, `exists?/2`, `write_file/4`, `mkdir/3`, `rm/3`,
+  `capabilities/1` (read-only backends refuse the mutations with :erofs).
+  The skeleton supplies `walk/3` and `materialize/2`.
   """
   defmacro __using__(_opts) do
     quote do
-      # ── eager read_file derived from stream_read ──
-      def read_file(impl, path) do
-        case VFS.Mountable.stream_read(impl, path, []) do
-          {:ok, stream, impl2} ->
-            {:ok, stream |> Enum.to_list() |> IO.iodata_to_binary(), impl2}
-          {:error, _} = err -> err
-        end
-      end
-
       # ── walk default composed from readdir + stat ──
-      def walk(impl, root, opts),      do: VFS.Default.walk(impl, root, opts)
-      def materialize(impl, _opts),    do: {:ok, impl}
+      def walk(impl, root, opts),   do: VFS.Default.walk(impl, root, opts)
+      def materialize(impl, _opts), do: {:ok, impl}
 
-      # ── optional non-streaming op defaults ──
-      def append_file(impl, path, content) do
-        case VFS.Mountable.read_file(impl, path) do
-          {:ok, existing, impl} ->
-            VFS.Mountable.write_file(impl, path, existing <> content, [])
-          {:error, :enoent} ->
-            VFS.Mountable.write_file(impl, path, content, [])
-          err -> err
-        end
-      end
-      def chmod(_impl, _path, _mode), do: {:error, :enotsup}
-      def symlink(_impl, _t, _l),     do: {:error, :enotsup}
-      def link(_impl, _e, _n),        do: {:error, :enotsup}
-      def readlink(_impl, _path),     do: {:error, :enotsup}
-      def lstat(impl, path),          do: VFS.Mountable.stat(impl, path)
-
-      defoverridable read_file: 2,
-                     walk: 3, materialize: 2,
-                     append_file: 3, chmod: 3, symlink: 3, link: 3,
-                     readlink: 2, lstat: 2
+      defoverridable walk: 3, materialize: 2
     end
   end
 end
 ```
 
-The default `walk` lives in `VFS.Default.walk/3` — a `Stream.resource` that recursively `readdir`s. The `grep` and `glob` helpers (in the `VFS` module, not the protocol) compose on top of `walk` + `stream_read` + line scan. The cache-eviction caveat (cache state populated *during* enumeration doesn't escape the stream) is documented below; `materialize/2` is the lever for callers who need it pre-populated.
+The default `walk` lives in `VFS.Default.walk/3` — a lazy depth-first traversal that recursively `readdir`s. The eager read is *not* a protocol op or skeleton default: `VFS.read_file/2` (the public helper) runs `stream_read/3` into a binary, so every backend gets it for free and backends with bytes already in hand return a single-chunk stream. The cache-eviction caveat (cache state populated *during* enumeration doesn't escape the stream) is documented below; `materialize/2` is the lever for callers who need it pre-populated.
 
 ### Example: how `:exgit` ships a defimpl (lives in exgit, not vfs)
 
 Exgit takes `:vfs` as an optional dep and ships `defimpl VFS.Mountable, for: Exgit.Repository`. Per Dave: *"I could see the behavior for VFS implemented by ExGit instead. Protocols make this possible."* This is exactly the case protocols are for — vfs declares the abstraction, exgit attaches an impl directly to its own `Repository.t()` struct, no wrapper, no shim.
 
 ```elixir
-# THIS LIVES IN :exgit, NOT in :vfs
+# THIS LIVES IN :exgit, NOT in :vfs (illustrative sketch)
 defimpl VFS.Mountable, for: Exgit.Repository do
   use VFS.Skeleton
 
   # writes refused — git is read-only via this protocol
-  def write_file(_, _, _, _), do: {:error, :erofs}
-  def mkdir(_, _, _),         do: {:error, :erofs}
-  def rm(_, _, _),            do: {:error, :erofs}
-  def append_file(_, _, _),   do: {:error, :erofs}
+  def write_file(repo, path, _, _), do: {:error, VFS.Error.new(:erofs, path: path)}
+  def mkdir(repo, path, _),         do: {:error, VFS.Error.new(:erofs, path: path)}
+  def rm(repo, path, _),            do: {:error, VFS.Error.new(:erofs, path: path)}
 
   # streaming read — the primary read primitive
   def stream_read(%Exgit.Repository{} = repo, path, opts) do
@@ -355,7 +310,7 @@ defimpl VFS.Mountable, for: Exgit.Repository do
         chunk_size = Keyword.get(opts, :chunk_size, 64 * 1024)
         stream = data |> chunk_binary(chunk_size)
         {:ok, stream, repo2}
-      {:error, reason} -> {:error, map_error(reason)}
+      {:error, reason} -> {:error, VFS.Error.new(map_error(reason), path: path)}
     end
   end
 
@@ -372,7 +327,7 @@ defimpl VFS.Mountable, for: Exgit.Repository do
     end
   end
 
-  # ...stat, lstat, exists?, readdir, readlink wrap Exgit.FS too...
+  # ...stat, exists?, readdir wrap Exgit.FS too...
 
   def capabilities(_), do: MapSet.new([:read, :native_walk, :lazy])
 end
@@ -380,11 +335,11 @@ end
 
 Two things to note about what the defimpl does *not* contain:
 
-1. **No `grep`/`glob` impls.** Those aren't protocol ops. Users call `VFS.grep(fs, "/", "TODO")` and the helper composes `walk + stream_read + line scan` — correct, lazy, memory-bounded.
+1. **No `grep`/`glob` impls.** Those aren't protocol ops (or library helpers). Consumers compose `walk + stream_read + line scan` — correct, lazy, memory-bounded; see "Worked example 1" below.
 
 2. **The pack-internal grep optimization remains accessible as `Exgit.FS.grep/4`** — a backend-specific function on the exgit side. Power users who have an `Exgit.Repository` in hand and need maximum performance call it directly. This is the "escape hatch" pattern: the protocol gives you correctness and abstraction; the backend module gives you peak performance when you need it.
 
-The 1M-file `grep -r TODO /repo` agent case via the protocol: `VFS.grep` walks tree objects (no blob fetches), then for each path calls `stream_read` (one blob at a time, line-scanned, discarded). Memory bounded to one blob. Correct. Slower than `Exgit.FS.grep/4`'s pack scanner, but the latter is a perf optimization the abstraction doesn't need to absorb.
+The 1M-file `grep -r TODO /repo` agent case via the protocol: a consumer grep walks tree objects (no blob fetches), then for each path calls `stream_read` (one blob at a time, line-scanned, discarded). Memory bounded to one blob. Correct. Slower than `Exgit.FS.grep/4`'s pack scanner, but the latter is a perf optimization the abstraction doesn't need to absorb.
 
 ---
 
@@ -397,7 +352,7 @@ The protocol's read-side surface is built around two primitives:
 
 Together these are sufficient for any bulk read-side operation a consumer wants to build. The motivating scenario was "1M-file grep on an exgit-backed mount," but the primitives weren't designed for grep — they're designed for *any* bulk traversal that needs to stay memory-bounded and lazy on the per-file axis. Below: three worked examples showing the same primitives compose into different consumer-side operations.
 
-### Worked example 1: `grep` (in the `VFS` helper module)
+### Worked example 1: `grep` (consumer-side, not in the library)
 
 ```elixir
 def grep(fs, root, pattern, opts \\ []) do
@@ -497,7 +452,7 @@ The bar for adding a new protocol op: **it can't be expressed efficiently in ter
 
 | Operation | Status | Reasoning |
 |---|---|---|
-| `glob` (declarative path filter) | Helper, not protocol op | Composes from `walk + path match`. Could become a `:glob` *option* on `walk` in v0.2 if backends with metadata indexes (sqlite-backed, S3) want pushdown. |
+| `glob` (declarative path filter) | Consumer-side, not protocol op | Composes from `walk + path match`. Could become a `:glob` *option* on `walk` in v0.2 if backends with metadata indexes (sqlite-backed, S3) want pushdown. |
 | `hash(path)` (content-addressed) | Not in v1 | Git has it natively; nobody else does yet. Future `VFS.ContentAddressed` optional protocol when a second backend gains native hashes. |
 | `diff(fs1, fs2)` | Not in v1 | Cross-FS, expensive in general. Caller composes from two walks + comparison. Future `VFS.Diffable` if it recurs. |
 | `find(predicate)` (stat-based) | Not in v1 | Caller `Stream.filter`s walk output. Pushdown only matters for backends with metadata indexes; deferred until that comes up. |
@@ -510,7 +465,7 @@ For maximum performance on a specific backend, users call backend functions dire
 
 ```elixir
 # Goes through the abstraction (correct, slower but bounded memory):
-VFS.grep(fs, "/repo", "TODO") |> Enum.to_list()
+MyApp.Grep.run(fs, "/repo", "TODO") |> Enum.to_list()   # walk + stream_read composition
 
 # Bypasses the abstraction for max perf (only works on exgit-backed):
 Exgit.FS.grep(repo, ref, "TODO", []) |> Enum.to_list()
@@ -540,7 +495,7 @@ We deliberately don't try to thread state through streams via tricks (`Stream.tr
 
 ### What we deliberately don't do in v1
 
-- **`grep`/`glob` as protocol ops.** Helpers in `VFS`, composed from primitives.
+- **`grep`/`glob` anywhere in the library.** Consumer-side compositions of the primitives (originally drafted as `VFS` helpers; cut entirely before 0.1).
 - **`%VFS.Match{}` struct.** Plain tuples in helper return values; consumers wrap to their own types if they want one. Avoids leaking op-specific shapes into the core.
 - **`VFS.Searchable` / `VFS.ContentAddressed` / `VFS.Diffable` optional protocols.** Deferred to v0.2+ if patterns recur across backends.
 - **Streaming writes.** `stream_write/3` is also v0.2 — `Enumerable.t() -> {:ok, impl}`. Default impl will `Enum.into` a buffered `write_file`. Multipart-upload backends override.
@@ -557,39 +512,44 @@ defmodule VFS do
   @type mount :: {mountpoint :: String.t(), backend :: struct()}
   @type t :: %__MODULE__{mounts: [mount()]}
 
-  # ── construction ──
-  def new(opts \\ [])
-  def new(initial_files) when is_map(initial_files), do: ...
-  def new(root: backend), do: %__MODULE__{mounts: [{"/", backend}]}
-
-  # ── mount management ──
+  # ── construction & mount management ──
+  def new, do: %__MODULE__{}
   def mount(%__MODULE__{} = vfs, mountpoint, backend), do: ...
   def umount(%__MODULE__{} = vfs, mountpoint), do: ...
   def mounts(%__MODULE__{} = vfs), do: ...
 
-  # ── thin helpers that delegate to the protocol ──
-  def stream_read(vfs, path, opts \\ []), do: VFS.Mountable.stream_read(vfs, path, opts)
-  def read_file(vfs, path),                do: VFS.Mountable.read_file(vfs, path)
-  def write_file(vfs, path, content, o \\ []), do: VFS.Mountable.write_file(vfs, path, content, o)
-  # ... etc — these exist for ergonomics so callers say `VFS.stream_read(fs, ...)` not `VFS.Mountable.stream_read(...)`
-
-  # ── composed ops not part of the protocol ──
-  def cp(vfs, src, dest, opts \\ []), do: ...
-  def mv(vfs, src, dest), do: ...
+  # ── telemetry-wrapped helpers that delegate to the protocol ──
+  # read_file/2 (derived from stream_read), stream_read/3, write_file/4,
+  # mkdir/3, rm/3, exists?/2, stat/2, readdir/2, walk/3, materialize/2,
+  # capabilities/1 — these exist for ergonomics (callers say
+  # `VFS.stream_read(fs, ...)`) and carry the :telemetry instrumentation.
+  #
+  # `cp`/`mv` were sketched here in the draft and cut: composable from
+  # read+write at the consumer, and cross-mount semantics (:exdev) are a
+  # consumer-policy decision.
 end
 
 defimpl VFS.Mountable, for: VFS do
   # Longest-prefix mount routing, backend state threaded back through the
   # mount tuple — exactly the logic in the existing `JustBash.FS`, but
-  # adapted so reads also produce updated state.
+  # adapted so reads also produce updated state. Errors bubbling up get
+  # :path rewritten into the user's namespace and :mount attached.
   def stream_read(%VFS{} = vfs, path, opts) do
-    {backend, backend_path, idx} = VFS.__resolve__(vfs, path)
-    case VFS.Mountable.stream_read(backend, backend_path, opts) do
-      {:ok, stream, new_backend} -> {:ok, stream, VFS.__put_mount__(vfs, idx, new_backend)}
-      {:error, _} = err -> err
+    case VFS.__resolve__(vfs, VFS.Path.normalize(path)) do
+      {:ok, mountpoint, sub, backend} ->
+        case VFS.Mountable.stream_read(backend, sub, opts) do
+          {:ok, stream, new_backend} ->
+            {:ok, stream, VFS.__put_mount__(vfs, mountpoint, new_backend)}
+
+          {:error, err} ->
+            {:error, err |> VFS.Error.put_path(path) |> VFS.Error.put_mount(mountpoint)}
+        end
+
+      :no_mount ->
+        {:error, VFS.Error.new(:enoent, path: path)}
     end
   end
-  # ... etc — readdir, stat, walk, glob, grep, write_file, etc. all follow the same shape
+  # ... etc — readdir, stat, walk, write_file, mkdir, rm all follow the same shape
 end
 ```
 
@@ -626,11 +586,11 @@ defimpl VFS.Mountable, for: MyApp.Overlay do
 
   def stream_read(%{upper: u, lower: l, whiteouts: w} = ov, path, opts) do
     cond do
-      MapSet.member?(w, path) -> {:error, :enoent}
+      MapSet.member?(w, path) -> {:error, VFS.Error.new(:enoent, path: path)}
       true ->
         case VFS.Mountable.stream_read(u, path, opts) do
           {:ok, s, u2} -> {:ok, s, %{ov | upper: u2}}
-          {:error, :enoent} ->
+          {:error, %VFS.Error{kind: :enoent}} ->
             case VFS.Mountable.stream_read(l, path, opts) do
               {:ok, s, l2} -> {:ok, s, %{ov | lower: l2}}
               other -> other
@@ -692,15 +652,15 @@ defimpl VFS.Mountable, for: MyApp.ReadOnly do
       err -> err
     end
   end
-  # ...stat, exists?, readdir, walk, glob, grep all delegate similarly...
+  # ...stat, exists?, readdir, walk all delegate similarly...
 
   # All writes refused regardless of inner's capabilities
-  def write_file(_, _, _, _), do: {:error, :erofs}
-  def mkdir(_, _, _),         do: {:error, :erofs}
-  def rm(_, _, _),            do: {:error, :erofs}
+  def write_file(_, path, _, _), do: {:error, VFS.Error.new(:erofs, path: path)}
+  def mkdir(_, path, _),         do: {:error, VFS.Error.new(:erofs, path: path)}
+  def rm(_, path, _),            do: {:error, VFS.Error.new(:erofs, path: path)}
 
   def capabilities(%{inner: i}),
-    do: VFS.Mountable.capabilities(i) |> MapSet.intersection(MapSet.new([:read, :native_walk, :native_glob, :native_grep, :lazy]))
+    do: VFS.Mountable.capabilities(i) |> MapSet.intersection(MapSet.new([:read, :native_walk, :native_stream_read, :lazy]))
 end
 ```
 
@@ -757,7 +717,7 @@ These were considered and deliberately punted; flagging here so the reviewer doe
 - **`VFS.S3` backend.** When added, will wrap Req's built-in S3 support. Until then, `Pyex.Filesystem.S3` ports forward as a leaf `defimpl VFS.Mountable, for: Pyex.Filesystem.S3` so we don't lose S3 capability during migration.
 - **Streaming writes (`stream_write/3`).** Not needed for the agent loop in v1. Would land alongside `VFS.S3`'s multipart upload — at that point the protocol grows one callback with a default `Enum.into` impl.
 - **`tail`-style path watching.** Different concern from VFS streaming; would get its own protocol (`VFS.Watch`) when a real workload demands it.
-- **Concurrent grep across mounts.** `%VFS{}` mount-table `grep` concatenates per-mount streams sequentially in v1. Parallelizing is a `Task.async_stream` away when a workload shows it matters.
+- **Concurrent walk across mounts.** The `%VFS{}` mount-table `walk` concatenates per-mount streams sequentially in v1. Parallelizing is a `Task.async_stream` away when a workload shows it matters.
 - **Read/write protocol split.** Single `VFS.Mountable` protocol with `:erofs`/`:enotsup` returns and `capabilities/1` introspection, not separate `Read`/`Write` protocols. The split would force every dispatcher op to pick which protocol to dispatch to, and we'd lose protocol consolidation wins.
 
 ## v1 deliverable checklist
@@ -765,18 +725,18 @@ These were considered and deliberately punted; flagging here so the reviewer doe
 **`ivarvong/vfs`:**
 - [ ] Repo created, `mix new` skeleton, zero non-stdlib deps
 - [ ] `VFS.Stat`, `VFS.Path` (pure path utilities)
-- [ ] `VFS.Mountable` protocol — required minimum: `stream_read`, `readdir`, `stat`, `exists?`, `walk`, `capabilities`. Optional (Skeleton supplies defaults): everything else.
-- [ ] `VFS.Default` — fallback impls for `read_file`/`walk`
-- [ ] `VFS.Skeleton` — `use`-able macro that wires defaults + `:enotsup`/`:erofs` for unsupported optional ops
+- [ ] `VFS.Mountable` protocol — 10 callbacks; Skeleton supplies `walk`/`materialize` defaults
+- [ ] `VFS.Default` — fallback impl for `walk`
+- [ ] `VFS.Skeleton` — `use`-able macro that wires the defaults
 - [ ] `VFS.Memory` — in-memory backend (port + simplification of `JustBash.FS.InMemoryFS`)
 - [ ] `%VFS{}` mount-table struct + `defimpl VFS.Mountable, for: VFS` (port of existing routing logic from `feat/mountable-virtual-filesystem-core`)
-- [ ] `grep` and `glob` helpers (composed from `walk` + `stream_read`; return plain-tuple streams)
+- [ ] ~~`grep` and `glob` helpers~~ — cut from the library; consumer-side compositions (see "Worked example 1")
 - [ ] Conformance test suite parametrized over impls — every backend runs the same test set
 - [ ] README documenting the worked-example patterns (CoW overlay, read-only wrapper) so users know how to compose
 
 **`ivarvong/exgit`:**
 - [ ] Add `:vfs` as an optional dep
-- [ ] `defimpl VFS.Mountable, for: Exgit.Repository` — wraps `Exgit.FS` with native pushdowns for `walk`/`glob`/`grep`/`materialize`
+- [ ] `defimpl VFS.Mountable, for: Exgit.Repository` — wraps `Exgit.FS` with native pushdowns for `walk`/`materialize`
 - [ ] Tests confirming the defimpl passes vfs's conformance suite (read-only subset)
 
 **`elixir-ai-tools/just_bash`:**

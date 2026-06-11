@@ -435,6 +435,154 @@ defmodule VFS.ContractsTest do
   end
 
   # ─────────────────────────────────────────────────────────────────────
+  # CONTRACT: readdir listings never contain duplicate names
+  # ─────────────────────────────────────────────────────────────────────
+  #
+  # A directory entry appearing twice is a silent wrong answer: a
+  # consumer deduping by name hides the bug; one iterating visits a
+  # child twice. The dangerous case is sibling mounts sharing a
+  # synthetic parent — mounts at /a/b and /a/c both imply an "a" entry
+  # under /, and the mount-table dispatcher must emit it once.
+  describe "readdir: listings never contain duplicate names" do
+    test "sibling mounts under a shared synthetic parent dedupe to one name" do
+      fs =
+        VFS.new()
+        |> VFS.mount("/a/b", VFS.Memory.new())
+        |> VFS.mount("/a/c", VFS.Memory.new())
+
+      assert {:ok, names, _} = VFS.readdir(fs, "/")
+      assert Enum.to_list(names) == ["a"]
+    end
+
+    property "any mount table yields duplicate-free readdir at every level" do
+      check all spec <- mount_table_spec(), max_runs: 100 do
+        fs = build_mount_table(spec)
+
+        dirs =
+          spec
+          |> Enum.flat_map(fn {mp, _} -> ancestors_of(mp) end)
+          |> Enum.uniq()
+
+        for dir <- ["/" | dirs] do
+          case VFS.readdir(fs, dir) do
+            {:ok, names, _} ->
+              names = Enum.to_list(names)
+
+              assert names == Enum.uniq(names), """
+              readdir(#{inspect(dir)}) returned duplicates: #{inspect(names)}
+              Mount table: #{inspect(spec, pretty: true)}
+              """
+
+            {:error, _} ->
+              :ok
+          end
+        end
+      end
+    end
+  end
+
+  # ─────────────────────────────────────────────────────────────────────
+  # CONTRACT: mkdir is :eexist on any existing path; parents: true is
+  # a success no-op over existing directories (mkdir -p semantics)
+  # ─────────────────────────────────────────────────────────────────────
+  #
+  # The :eexist kind is documented as "path already exists" — that
+  # includes implicit directories (an ancestor of an existing file) and
+  # root, not just directories recorded by a prior mkdir. With
+  # `parents: true`, an existing directory is success, never an error,
+  # and repeated calls converge to the same state.
+  describe "mkdir: :eexist on existing paths, idempotent with parents: true" do
+    test "mkdir of an implicit directory is :eexist" do
+      mem = VFS.Memory.new(%{"/a/b" => "x"})
+      assert {:error, %VFS.Error{kind: :eexist}} = VFS.Mountable.mkdir(mem, "/a", [])
+    end
+
+    test "mkdir of root is :eexist" do
+      assert {:error, %VFS.Error{kind: :eexist}} = VFS.Mountable.mkdir(VFS.Memory.new(), "/", [])
+    end
+
+    test "mkdir parents: true is a success no-op on any existing directory" do
+      mem = VFS.Memory.new(%{"/a/b" => "x"})
+      assert {:ok, ^mem} = VFS.Mountable.mkdir(mem, "/a", parents: true)
+      assert {:ok, ^mem} = VFS.Mountable.mkdir(mem, "/", parents: true)
+    end
+
+    property "mkdir with parents: true is idempotent" do
+      check all segs <- list_of(member_of(["a", "b", "c"]), min_length: 1, max_length: 3),
+                max_runs: 30 do
+        path = "/" <> Enum.join(segs, "/")
+        {:ok, once} = VFS.Mountable.mkdir(VFS.Memory.new(), path, parents: true)
+        assert {:ok, twice} = VFS.Mountable.mkdir(once, path, parents: true)
+        assert twice == once
+      end
+    end
+
+    property "mkdir without parents on any existing directory is :eexist" do
+      check all seed <- well_formed_memory_seed(), max_runs: 50 do
+        mem = VFS.Memory.new(seed)
+
+        existing_dirs =
+          seed |> Map.keys() |> Enum.flat_map(&ancestors_of/1) |> Enum.uniq()
+
+        for dir <- ["/" | existing_dirs] do
+          assert match?(
+                   {:error, %VFS.Error{kind: :eexist}},
+                   VFS.Mountable.mkdir(mem, dir, [])
+                 ),
+                 "mkdir of existing directory #{dir} did not return :eexist"
+        end
+      end
+    end
+  end
+
+  # ─────────────────────────────────────────────────────────────────────
+  # CONTRACT: mount-table errors speak the user's namespace
+  # ─────────────────────────────────────────────────────────────────────
+  #
+  # %VFS.Error{} documents :path as "the path that failed, as the *user*
+  # expressed it". The human-readable message must agree: an error whose
+  # message names a mount-stripped backend-internal path (":enoent at
+  # /x" for a failure at "/repo/x") leaks a path that does not exist in
+  # the user's namespace into logs and exception output.
+  describe "mount-table errors: message reflects the user's path" do
+    property "errors bubbled through a non-root mount mention the full user path" do
+      check all mp <- member_of(["/repo", "/a/b"]),
+                file <- member_of(["/nope", "/missing/deep"]),
+                max_runs: 30 do
+        fs = VFS.new() |> VFS.mount(mp, VFS.Memory.new())
+        user_path = mp <> file
+
+        {:error, err} = VFS.read_file(fs, user_path)
+        assert err.path == user_path
+        assert Exception.message(err) =~ user_path
+      end
+    end
+
+    test "readdir / write_file / rm errors also carry the user path in the message" do
+      fs = VFS.new() |> VFS.mount("/repo", VFS.Memory.new(%{"/file" => "x"}))
+
+      {:error, err} = VFS.readdir(fs, "/repo/file")
+      assert err.kind == :enotdir
+      assert Exception.message(err) =~ "/repo/file"
+
+      {:error, err} = VFS.write_file(fs, "/repo/file/child", "x")
+      assert err.kind == :enotdir
+      assert Exception.message(err) =~ "/repo/file/child"
+
+      {:error, err} = VFS.rm(fs, "/repo/gone")
+      assert err.kind == :enoent
+      assert Exception.message(err) =~ "/repo/gone"
+    end
+
+    test "a backend's custom message survives the path rewrite" do
+      err = VFS.Error.new(:eio, path: "/x", message: "disk on fire")
+      rewritten = VFS.Error.put_path(err, "/repo/x")
+      assert rewritten.path == "/repo/x"
+      assert Exception.message(rewritten) == "disk on fire"
+    end
+  end
+
+  # ─────────────────────────────────────────────────────────────────────
   # CONTRACT: adversarial inputs to public API don't crash; either
   # succeed deterministically or fail deterministically with :einval
   # (or ArgumentError for constructors).
@@ -504,6 +652,24 @@ defmodule VFS.ContractsTest do
         rescue
           ArgumentError -> :ok
         end
+      end
+    end
+  end
+
+  describe "adversarial inputs: VFS.Memory.new/1 rejects non-binary seeds" do
+    # The constructor's docs promise an internally consistent backend or
+    # an ArgumentError at construction. A non-binary value (or key)
+    # accepted here would defer the crash to the first stat/read — the
+    # worst place for it, deep in a consumer's agent loop.
+    property "any seed with a non-binary value raises ArgumentError at construction" do
+      check all value <- non_binary_term(), max_runs: 50 do
+        assert_raise ArgumentError, fn -> VFS.Memory.new(%{"/a" => value}) end
+      end
+    end
+
+    property "any seed with a non-binary key raises ArgumentError at construction" do
+      check all key <- non_binary_term(), max_runs: 50 do
+        assert_raise ArgumentError, fn -> VFS.Memory.new(%{key => "content"}) end
       end
     end
   end
@@ -589,6 +755,27 @@ defmodule VFS.ContractsTest do
   # ─────────────────────────────────────────────────────────────────────
   # generators
   # ─────────────────────────────────────────────────────────────────────
+
+  defp non_binary_term do
+    one_of([
+      integer(),
+      float(),
+      atom(:alphanumeric),
+      list_of(integer(), max_length: 3),
+      constant(nil),
+      constant(~c"charlist"),
+      map_of(atom(:alphanumeric), integer(), max_length: 2)
+    ])
+  end
+
+  defp ancestors_of("/"), do: []
+
+  defp ancestors_of(path) do
+    case VFS.Path.dirname(path) do
+      "/" -> []
+      parent -> [parent | ancestors_of(parent)]
+    end
+  end
 
   defp mount_table_spec do
     list_of(mount_spec(), min_length: 1, max_length: 4)

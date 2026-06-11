@@ -10,6 +10,41 @@ will always be flagged here.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-06-10
+
+First public release.
+
+### Release-readiness review (2026-06-10): four more contract bugs fixed
+
+A multi-agent pre-release audit found four contract violations, each now
+locked in by a property in `test/vfs/contracts_test.exs` (written first,
+RED → GREEN):
+
+  - **Mount-table `readdir` returned duplicate names.** Sibling mounts
+    under a shared synthetic parent (`/a/b` and `/a/c`) each contributed
+    an `"a"` entry to `readdir("/")`. Synthetic children are now deduped
+    at the source.
+
+  - **`VFS.Memory`'s `mkdir` missed `:eexist` for implicit directories
+    and root**, and `parents: true` was non-idempotent (second call errored).
+    Any existing directory — explicit, implicit, or root — is now
+    `:eexist`, and `parents: true` is a success no-op over existing
+    directories, matching `mkdir -p`.
+
+  - **Dispatcher errors leaked backend-internal paths in messages.** The
+    mount table rewrote `:path` into the user's namespace but left the
+    default `:message` naming the mount-stripped path (`":enoent at /x"`
+    for a failure at `/repo/x`). New `VFS.Error.put_path/2` regenerates
+    the default message on rewrite; custom messages are preserved.
+
+  - **`VFS.Memory.new/1` accepted non-binary seed keys/values**, deferring
+    the crash to the first `stat`/`read`. Both now fail at construction
+    with a clear `ArgumentError`.
+
+  Also: `VFS.readdir/2`'s `@spec` claimed `[String.t()]` where the
+  protocol (and the dispatcher's own unbounded branch) returns
+  `Enumerable.t(String.t())`; the spec and docs now match the protocol.
+
 ### Audit (2026-05-02): four contract bugs found and fixed
 
 A staff-level review surfaced four bugs that the existing 100%-coverage,
@@ -59,29 +94,13 @@ published contract." Each is now a property in `test/vfs/contracts_test.exs`.
   the same validated helper. Added because `VFS.Test.AppService`
   silently ignored those options before the audit caught it.
 
-### Added
-
-- `test/vfs/contracts_test.exs`: 17 property tests over the published
-  protocol contract — observation consistency (stat/readdir/exists?/
-  read_file agreement), write/read round-trip, rm+read agreement,
-  materialize idempotence, byte_range and line_range validation,
-  capabilities reflect behavior, adversarial inputs to constructors,
-  walk = read-reachable namespace, walk + take terminates over
-  unbounded readdir.
-
-- `lib/vfs/stream_options.ex`: shared option handler for backend
-  authors. ~150 lines, 100% covered by `test/vfs/stream_options_test.exs`.
-
-- Conformance suite extended to `VFS.Test.AppService` (read+write,
-  no mkdir) and `VFS.Test.LazyFake` (read-only).
-
 ### Numbers after the audit
 
   - 331 tests / 45 properties / 36 doctests / 0 failures across all scopes
   - 100% line coverage
   - 97.7% mutation kill rate (up from 93%)
-  - `mix check` clean: format, compile -W, credo, dialyzer, coverage
-  - `mix vfs.audit` clean: 0 high / 0 medium / 0 low findings
+  - mix check clean: format, compile -W, credo, dialyzer, coverage
+  - static perf audit (mix vfs.audit) clean: 0 high / 0 medium / 0 low findings
 
 ### Added
 - `VFS.Mountable` protocol — pluggable virtual filesystem with state-threading reads.
@@ -93,6 +112,22 @@ published contract." Each is now a property in `test/vfs/contracts_test.exs`.
 - `VFS.Skeleton` macro for backend authors; `VFS.Default` fallback walk impl.
 - `VFS.read_file/2` derived from `VFS.Mountable.stream_read/3`; honors
   `:chunk_size`, `:byte_range`, and `:line_range` options.
-- Telemetry events under the `[:vfs, _, _]` prefix for every public op.
+- Telemetry events under the `[:vfs, _, _]` prefix for the data-flow ops
+  (`read_file`, `stream_read`, `write_file`, `mkdir`, `rm`, `walk`,
+  `materialize`) plus `[:vfs, :cache, :hit | :miss]` from lazy backends.
 - `VFS.assert_implemented!/1` for validating values at trust boundaries.
 - Conformance test harness (`VFS.ConformanceCase`) parametrized over backend impls.
+- `test/vfs/contracts_test.exs`: property tests over the published
+  protocol contract — observation consistency (stat/readdir/exists?/
+  read_file agreement), write/read round-trip, rm+read agreement,
+  materialize idempotence, byte_range and line_range validation,
+  capabilities reflect behavior, adversarial inputs to constructors,
+  walk = read-reachable namespace, walk + take terminates over
+  unbounded readdir.
+- `lib/vfs/stream_options.ex`: shared option handler for backend
+  authors, 100% covered by `test/vfs/stream_options_test.exs`.
+- Conformance suite extended to `VFS.Test.AppService` (read+write,
+  no mkdir) and `VFS.Test.LazyFake` (read-only).
+
+[Unreleased]: https://github.com/ivarvong/vfs/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/ivarvong/vfs/releases/tag/v0.1.0
