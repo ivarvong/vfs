@@ -10,7 +10,7 @@ will always be flagged here.
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-06-10
+## [0.1.0] - 2026-06-12
 
 First public release.
 
@@ -110,12 +110,16 @@ published contract." Each is now a property in `test/vfs/contracts_test.exs`.
 - `VFS.Memory` in-memory backend (read+write).
 - `%VFS{}` mount table with longest-prefix routing; itself a `VFS.Mountable`.
 - `VFS.Skeleton` macro for backend authors; `VFS.Default` fallback walk impl.
-- `VFS.read_file/2` derived from `VFS.Mountable.stream_read/3`; honors
-  `:chunk_size`, `:byte_range`, and `:line_range` options.
+- `VFS.read_file/2` derived from `VFS.Mountable.stream_read/3`; use
+  `VFS.stream_read/3` for `:chunk_size`, `:byte_range`, and `:line_range`
+  options.
 - Telemetry events under the `[:vfs, _, _]` prefix for the data-flow ops
   (`read_file`, `stream_read`, `write_file`, `mkdir`, `rm`, `walk`,
   `materialize`) plus `[:vfs, :cache, :hit | :miss]` from lazy backends.
 - `VFS.assert_implemented!/1` for validating values at trust boundaries.
+  `VFS.mount/3` calls it on every backend, so a struct without a
+  `VFS.Mountable` impl fails fast at mount time with a helpful
+  `ArgumentError` instead of a `Protocol.UndefinedError` at first use.
 - Conformance test harness (`VFS.ConformanceCase`) parametrized over backend impls.
 - `test/vfs/contracts_test.exs`: property tests over the published
   protocol contract — observation consistency (stat/readdir/exists?/

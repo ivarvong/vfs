@@ -80,6 +80,8 @@ defmodule VFS do
   point, it is replaced. Mounts are kept sorted by mountpoint length
   (longest first) so longest-prefix routing is a linear scan.
 
+  Raises `ArgumentError` if `backend` does not implement `VFS.Mountable`.
+
   ## Examples
 
       iex> fs = VFS.new() |> VFS.mount("/repo", VFS.Memory.new(%{"/x" => "1"}))
@@ -89,6 +91,8 @@ defmodule VFS do
   """
   @spec mount(t(), String.t(), Mountable.t()) :: t()
   def mount(%__MODULE__{} = vfs, mountpoint, backend) when is_struct(backend) do
+    assert_implemented!(backend)
+
     mp = VPath.normalize(mountpoint)
     others = Enum.reject(vfs.mounts, fn {p, _} -> p == mp end)
     sorted = [{mp, backend} | others] |> Enum.sort_by(fn {p, _} -> -byte_size(p) end)
@@ -109,7 +113,15 @@ defmodule VFS do
     %{vfs | mounts: Enum.reject(vfs.mounts, fn {p, _} -> p == mp end)}
   end
 
-  @doc "Return the list of `{mountpoint, backend}` pairs in longest-first order."
+  @doc """
+  Return the list of `{mountpoint, backend}` pairs in longest-first order.
+
+  ## Examples
+
+      iex> fs = VFS.new() |> VFS.mount("/repo", VFS.Memory.new()) |> VFS.mount("/", VFS.Memory.new())
+      iex> fs |> VFS.mounts() |> Enum.map(&elem(&1, 0))
+      ["/repo", "/"]
+  """
   @spec mounts(t()) :: [mount]
   def mounts(%__MODULE__{mounts: ms}), do: ms
 
@@ -118,7 +130,16 @@ defmodule VFS do
   @doc """
   Read the entire content of `path`.
 
-  Derived from `stream_read/3` — runs the chunk stream into a binary.
+  Derived from `stream_read/3` — runs the chunk stream into a binary. Use
+  `stream_read/3` directly when you need `:chunk_size`, `:byte_range`, or
+  `:line_range` options.
+
+  ## Examples
+
+      iex> mem = VFS.Memory.new(%{"/hello.txt" => "hello"})
+      iex> {:ok, "hello", _mem} = VFS.read_file(mem, "/hello.txt")
+      iex> :ok
+      :ok
   """
   @spec read_file(Mountable.t(), String.t()) ::
           {:ok, binary, Mountable.t()} | {:error, Error.t()}
@@ -135,7 +156,16 @@ defmodule VFS do
     end)
   end
 
-  @doc "Open `path` for streaming read. See `VFS.Mountable.stream_read/3`."
+  @doc """
+  Open `path` for streaming read. See `VFS.Mountable.stream_read/3`.
+
+  ## Examples
+
+      iex> mem = VFS.Memory.new(%{"/hello.txt" => "hello\\nworld\\n"})
+      iex> {:ok, stream, _mem} = VFS.stream_read(mem, "/hello.txt", line_range: {2, 2})
+      iex> Enum.to_list(stream)
+      ["world"]
+  """
   @spec stream_read(Mountable.t(), String.t(), keyword) ::
           {:ok, Enumerable.t(binary), Mountable.t()} | {:error, Error.t()}
   def stream_read(impl, path, opts \\ []) do
@@ -147,7 +177,19 @@ defmodule VFS do
     end)
   end
 
-  @doc "Write `content` to `path`."
+  @doc """
+  Write `content` to `path`.
+
+  Returns the updated filesystem state; thread it into subsequent calls.
+
+  ## Examples
+
+      iex> mem = VFS.Memory.new()
+      iex> {:ok, mem} = VFS.write_file(mem, "/note.txt", "hi")
+      iex> {:ok, "hi", _mem} = VFS.read_file(mem, "/note.txt")
+      iex> :ok
+      :ok
+  """
   @spec write_file(Mountable.t(), String.t(), binary, keyword) ::
           {:ok, Mountable.t()} | {:error, Error.t()}
   def write_file(impl, path, content, opts \\ []) when is_binary(content) do
@@ -163,7 +205,19 @@ defmodule VFS do
     )
   end
 
-  @doc "Create directory at `path`."
+  @doc """
+  Create directory at `path`.
+
+  Pass `parents: true` for `mkdir -p` behavior.
+
+  ## Examples
+
+      iex> mem = VFS.Memory.new()
+      iex> {:ok, mem} = VFS.mkdir(mem, "/a/b", parents: true)
+      iex> {true, _mem} = VFS.exists?(mem, "/a/b")
+      iex> :ok
+      :ok
+  """
   @spec mkdir(Mountable.t(), String.t(), keyword) ::
           {:ok, Mountable.t()} | {:error, Error.t()}
   def mkdir(impl, path, opts \\ []) do
@@ -175,7 +229,19 @@ defmodule VFS do
     end)
   end
 
-  @doc "Remove `path`."
+  @doc """
+  Remove `path`.
+
+  Pass `recursive: true` to remove a directory tree.
+
+  ## Examples
+
+      iex> mem = VFS.Memory.new(%{"/note.txt" => "hi"})
+      iex> {:ok, mem} = VFS.rm(mem, "/note.txt")
+      iex> {false, _mem} = VFS.exists?(mem, "/note.txt")
+      iex> :ok
+      :ok
+  """
   @spec rm(Mountable.t(), String.t(), keyword) ::
           {:ok, Mountable.t()} | {:error, Error.t()}
   def rm(impl, path, opts \\ []) do
@@ -187,11 +253,29 @@ defmodule VFS do
     end)
   end
 
-  @doc "Whether `path` exists."
+  @doc """
+  Return whether `path` exists, plus the possibly cache-updated state.
+
+  ## Examples
+
+      iex> mem = VFS.Memory.new(%{"/note.txt" => "hi"})
+      iex> {true, _mem} = VFS.exists?(mem, "/note.txt")
+      iex> :ok
+      :ok
+  """
   @spec exists?(Mountable.t(), String.t()) :: {boolean, Mountable.t()}
   def exists?(impl, path), do: Mountable.exists?(impl, path)
 
-  @doc "Stat `path`."
+  @doc """
+  Return metadata for `path`.
+
+  ## Examples
+
+      iex> mem = VFS.Memory.new(%{"/note.txt" => "hi"})
+      iex> {:ok, %VFS.Stat{type: :regular, size: 2}, _mem} = VFS.stat(mem, "/note.txt")
+      iex> :ok
+      :ok
+  """
   @spec stat(Mountable.t(), String.t()) ::
           {:ok, VFS.Stat.t(), Mountable.t()} | {:error, Error.t()}
   def stat(impl, path), do: Mountable.stat(impl, path)
@@ -208,7 +292,18 @@ defmodule VFS do
           {:ok, Enumerable.t(String.t()), Mountable.t()} | {:error, Error.t()}
   def readdir(impl, path), do: Mountable.readdir(impl, path)
 
-  @doc "Pre-warm any internal cache. See `VFS.Mountable.materialize/2`."
+  @doc """
+  Pre-warm any internal cache. See `VFS.Mountable.materialize/2`.
+
+  Non-lazy backends usually return unchanged state.
+
+  ## Examples
+
+      iex> mem = VFS.Memory.new(%{"/note.txt" => "hi"})
+      iex> {:ok, ^mem} = VFS.materialize(mem)
+      iex> :ok
+      :ok
+  """
   @spec materialize(Mountable.t(), keyword) ::
           {:ok, Mountable.t()} | {:error, Error.t()}
   def materialize(impl, opts \\ []) do
@@ -220,7 +315,15 @@ defmodule VFS do
     end)
   end
 
-  @doc "Capabilities supported by the impl."
+  @doc """
+  Return the capability set supported by `impl`.
+
+  ## Examples
+
+      iex> caps = VFS.capabilities(VFS.Memory.new())
+      iex> MapSet.subset?(MapSet.new([:read, :write, :mkdir]), caps)
+      true
+  """
   @spec capabilities(Mountable.t()) :: MapSet.t(Mountable.capability())
   def capabilities(impl), do: Mountable.capabilities(impl)
 

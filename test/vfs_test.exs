@@ -53,6 +53,12 @@ defmodule VFSTest do
 
       assert ["/a/b/c", "/a/b", "/a", "/"] == Enum.map(VFS.mounts(fs), &elem(&1, 0))
     end
+
+    test "rejects structs that do not implement VFS.Mountable" do
+      assert_raise ArgumentError, ~r/does not implement the VFS\.Mountable protocol/, fn ->
+        VFS.mount(VFS.new(), "/uri", %URI{})
+      end
+    end
   end
 
   describe "umount/2" do

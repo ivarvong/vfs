@@ -69,11 +69,22 @@ defprotocol VFS.Mountable do
 
   # ── queries — return state because lazy backends mutate cache on read ──
 
-  @doc "Return whether `path` exists, plus the (possibly cache-updated) impl."
+  @doc """
+  Return whether `path` exists, plus the possibly cache-updated impl.
+
+  Implementations normalize `path`, check both files and directories, and
+  return the updated impl even for negative lookups so lazy backends can keep
+  metadata caches warm.
+  """
   @spec exists?(t, path) :: {boolean, t}
   def exists?(impl, path)
 
-  @doc "Return metadata for `path`."
+  @doc """
+  Return metadata for `path`.
+
+  Success returns `%VFS.Stat{}` and the updated impl. Failure returns a
+  structured `%VFS.Error{}`; callers pattern-match on `error.kind`.
+  """
   @spec stat(t, path) :: {:ok, VFS.Stat.t(), t} | {:error, VFS.Error.t()}
   def stat(impl, path)
 
@@ -152,7 +163,13 @@ defprotocol VFS.Mountable do
 
   # ── mutations ──
 
-  @doc "Write `content` to `path`. Options reserved for future use."
+  @doc """
+  Write `content` to `path`.
+
+  Success returns the updated impl. Read-only wrappers should return `:erofs`;
+  backends that fundamentally cannot write should return `:enotsup`.
+  Options are reserved for future use.
+  """
   @spec write_file(t, path, binary, keyword) :: {:ok, t} | {:error, VFS.Error.t()}
   def write_file(impl, path, content, opts)
 
@@ -176,7 +193,13 @@ defprotocol VFS.Mountable do
 
   # ── introspection ──
 
-  @doc "Return the set of capabilities this impl supports."
+  @doc """
+  Return the set of capabilities this impl supports.
+
+  Capability claims should match observed behavior: for example, a backend
+  without `:mkdir` should consistently return `:erofs` or `:enotsup` from
+  `mkdir/3`.
+  """
   @spec capabilities(t) :: MapSet.t(capability)
   def capabilities(impl)
 end

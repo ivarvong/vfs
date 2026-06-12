@@ -27,8 +27,9 @@ jobs:
             otp: "27.2"
             consolidate: "false"
           # Bleeding edge: where new compiler/type warnings surface.
-          - elixir: "1.20.0-rc.4"
-            otp: "27.2"
+          # Keep this aligned with .tool-versions for reproducible local/CI gates.
+          - elixir: "1.20.0-rc.3"
+            otp: "28.4"
             consolidate: "false"
           # Confirm protocol consolidation (release-style) doesn't break dispatch.
           - elixir: "1.18.4"

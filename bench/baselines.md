@@ -34,17 +34,18 @@ MIX_ENV=test mix run bench/lazy_cache.exs   # uses GitFake from test/support/
 
 ## `VFS.Memory` I/O — read/write throughput
 
-| Op                                | 1 KB     | 64 KB    | 1 MB      |
-|-----------------------------------|----------|----------|-----------|
-| `read_file` (eager Memory override) | 349 ns | 354 ns | 570 ns  |
-| `stream_read` + iodata collect    | 393 ns   | 392 ns   | 17.7 µs   |
-| `write_file` (overwrite)          | 989 ns   | 972 ns   | 1.49 µs   |
+| Op                                      | 1 KB   | 64 KB  | 1 MB    |
+|-----------------------------------------|--------|--------|---------|
+| `read_file` (Memory single-chunk stream) | 349 ns | 354 ns | 570 ns  |
+| `stream_read` + iodata collect          | 393 ns | 392 ns | 17.7 µs |
+| `write_file` (overwrite)                | 989 ns | 972 ns | 1.49 µs |
 
 **Takeaways:**
 
-- Memory's `read_file/2` override returns the binary directly, so it's
-  ~constant-time regardless of size. Use it when you want the full
-  content; it's 30x faster than `stream_read`-then-collect for 1 MB.
+- Memory returns a single-chunk stream from `stream_read/3`, so derived
+  `read_file/2` stays ~constant-time regardless of size. Use it when you
+  want the full content; it's 30x faster than multi-chunk stream collection
+  for 1 MB.
 - `stream_read` at default 64 KB chunks is the right choice for large
   files where you want to process incrementally — 17.7 µs for 1 MB is
   bandwidth-bound (~56 GB/s effective).
